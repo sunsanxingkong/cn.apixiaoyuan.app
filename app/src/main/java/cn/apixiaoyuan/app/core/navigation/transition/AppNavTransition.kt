@@ -105,14 +105,37 @@ private const val CLOSE_FADE_OFFSET = 35f
 private const val CROSS_ACTIVITY_MIN_SCALE = 0.9f
 
 /** 跨 Activity 转场的横向漂移量（AOSP 观感的关键：不是整屏滑，而是 96dp 位移）。 */
-private val CrossActivityDrift = 96.dp
+internal val CrossActivityDrift = 96.dp
 
 /** 缩放后的页面距屏幕边缘留白，避免圆角贴边。 */
 private val CrossActivityEdgeMargin = 8.dp
 
-private val ClassicActivityMotion = NavMotion(
+internal val ClassicActivityMotion = NavMotion(
     programmatic = NavSettleSpec.Tween(durationMillis = 450, easing = FastOutExtraSlowIn),
 )
+
+/**
+ * AOSP 那套转场的**时长（毫秒）**，从 [ClassicActivityMotion] 里取出来给别处复用。
+ *
+ * 为什么单独暴露一个数字：
+ * H5 容器（`PkH5Screen`）做内部切页转场时要和 App 的二级页转场**完全对齐** ——
+ * 用户原话是「切换页面的动画应该**联通 app 的切页动画**而不是自己乱写」。
+ * 所以那边**必须引用这里的常量**，而不是另写一个 260/450 的数字。
+ *
+ * （`NavSettleSpec.Tween` 的 duration 字段是 `durationMillis`；
+ *   写成函数是为了不必把 `NavMotion` 的内部结构暴露出去。）
+ */
+internal val AospTransitionDurationMs: Int
+    get() = (ClassicActivityMotion.programmatic as? NavSettleSpec.Tween)?.durationMillis ?: 450
+
+/** miuix 那套的时长（对齐 `NavTransitions.MiuixDefault` 的默认 settle；也是 450ms）。 */
+internal const val MiuixTransitionDurationMs: Int = 450
+
+/** miuix 被覆盖页的视差比例（`NavTransitions.MiuixDefault`：`coverProgress * width * 0.25f`）。 */
+internal const val MiuixCoverParallax = 0.25f
+
+/** miuix 被覆盖页的最终透明度（`NavTransitions.MiuixDefault`：`1f - 0.1f * coverProgress`）。 */
+internal const val MiuixCoverAlpha = 0.9f
 
 /**
  * 经典 Activity 打开：进场页从右侧漂移 96dp 淡入，被覆盖页保持不动。

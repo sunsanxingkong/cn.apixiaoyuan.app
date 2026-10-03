@@ -43,6 +43,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import cn.apixiaoyuan.app.core.design.icon.AppIcons
+import cn.apixiaoyuan.app.core.design.component.LocalTopBarInset
+import cn.apixiaoyuan.app.core.navigation.transition.AospTransitionDurationMs
+import cn.apixiaoyuan.app.core.navigation.transition.CrossActivityDrift
+import cn.apixiaoyuan.app.core.navigation.transition.MiuixCoverAlpha
+import cn.apixiaoyuan.app.core.navigation.transition.MiuixCoverParallax
+import cn.apixiaoyuan.app.core.navigation.transition.MiuixTransitionDurationMs
 import androidx.compose.foundation.background
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -401,9 +407,11 @@ fun PkH5Screen(
 
     val animPref = PageTransitionPrefs.animation
     // ★ 原生转场的两个输入：屏幕宽（miuix 用整屏宽、aosp 用 96dp）与密度。
-    val density = LocalDensity.current.density
     val screenW = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
-    val spec = remember(animPref, screenW, density) { navAnimSpecOf(animPref, screenW, density) }
+    // AOSP 的 96dp 漂移量：从 AppNavTransition 的**同一份定义**取（不自己写数字）。
+    // CompositionLocal 只能在 composable 里读，所以在这里先换算成像素再传进去。
+    val driftPx = with(LocalDensity.current) { CrossActivityDrift.toPx() }
+    val spec = remember(animPref, screenW, driftPx) { navAnimSpecOf(animPref, screenW, driftPx) }
     // 进度 → 位移/透明度（帧时钟驱动；不用自己起协程，也不会被重组打断）。
     val t by animateFloatAsState(
         targetValue = navAnim.progress,
@@ -453,11 +461,31 @@ fun PkH5Screen(
         //     只是不再显示（留着无副作用，别的页面还能用）。
 
         // ---- 内容区（WebView + 各种覆盖层）----
+        //
+        // ★★ 2026-10-04 修正（用户第二次指出）：
+        // > 「顶部纯色填充没看到，**h5 容器顶部应该下移因为手机菜单挡住了**」
+        //
+        // 我之前把顶栏 inset **去掉了**（想让 WebView 顶到屏幕最顶、交给 H5 自己躲），
+        // 但结果是 **H5 自己的抬头被手机的状态栏/菜单挡住** —— 因为这套 H5 页面
+        // 并不处理 `safe-area-inset-top`（它是按「原生容器已经留好顶部」的假设写的）。
+        //
+        // 正确做法（也是用户要的）：
+        //   **在 App 侧把 WebView 整体下移「状态栏高度」** —— 顶部那条就露出
+        //   `background(bg)` 的**纯色填充**（与 H5 页面同色），H5 的内容从纯色下方开始，
+        //   不会再被挡。
+        //
+        // ⚠️ 与 pk-node 的差异（为什么不能照搬）：pk-node 是网页里的 `<iframe>`，
+        //    浏览器会给它一个独立的布局视口；而我们是**全屏 WebView**，
+        //    edge-to-edge 下它从 y=0 开始画，所以必须由宿主让出状态栏那一条。
         Box(modifier = Modifier.weight(1f)) {
             AndroidView(
                 factory = { webView },
                 modifier = Modifier
                     .fillMaxSize()
+                    // ★ 顶部让出「状态栏 + 显示切口」那一条（用户要求「h5 容器顶部应该下移」）。
+                    //   顶部那条露出的是根 Column 的 `background(bg)` —— 就是**纯色填充**。
+                    //   这样 H5 自己的抬头不会被手机菜单挡住。
+                    .padding(top = LocalTopBarInset.current)
                     // ★ 原生切页转场（进入方向）：**整体动 WebView 自己**。
                     //
                     // 用户要求「切换 h5 要用 miuix 或 aosp 的原生动画，并且**只在 app 中
@@ -867,48 +895,62 @@ private class NavAnimHolder {
 }
 
 /**
- * 一个「原生转场」的观感参数（把 [PageTransitionAnimation] 的两套换算成数值）。
+ * 一个「原生转场」的观感参数。
  *
- * 数值全部对齐 App 已有的转场实现，**不是**自己拍脑袋定的：
+ * ★★ 2026-10-04 修正：**数值全部引用 App 转场的定义**，不再自己写。
+ *
+ * 用户原话：
+ * > 「切换页面的动画应该**联通 app 的切页动画**而不是自己乱写」
+ *
+ * 之前我把 `260`、`12%`、`0.25`、`450` 这些数字**硬编码**在这里，
+ * 与 `AppNavTransition` 里的定义是**两份**——改一边另一边就不一致了。
+ * 现在改成引用 `AppNavTransition.kt` 里 `internal` 暴露出来的同一批常量：
  *
  * | | MIUIX | AOSP |
  * |---|---|---|
- * | 进场位移 | **整屏宽**（`layoutSize.width`） | **96dp** |
- * | 时长 | 450ms | 450ms |
- * | 被覆盖层视差 | 0.25 宽 + alpha→0.9 | 0 宽（AOSP 是「轻推」，不做视差） |
+ * | 进场位移 | 整屏宽 | [CrossActivityDrift]（96dp） |
+ * | 时长 | [MiuixTransitionDurationMs] | [AospTransitionDurationMs] |
+ * | 被覆盖层视差 | [MiuixCoverParallax]（0.25 宽）+ alpha→[MiuixCoverAlpha] | 0（不视差）|
  *
- * miuix 侧依据 `NavTransitions.MiuixDefault`：
- * `translationX = -d * width`（整屏滑），被覆盖页 `-1 * coverProgress * width * 0.25f`
- * 且 `alpha = 1 - 0.1 * coverProgress`。
- * aosp 侧依据 `AppNavTransition.CrossActivityDrift = 96.dp` 与
- * `ClassicActivityMotion = Tween(450, FastOutExtraSlowIn)`。
+ * 依据（源码级，不是抄文档）：
+ *  - miuix：`miuix-nav` 的 `NavTransitions.MiuixDefault`
+ *      `translationX = -d * width`；被覆盖页 `-1 * coverProgress * width * 0.25f`、
+ *      `alpha = 1f - 0.1f * coverProgress`。
+ *  - aosp：本项目 `AppNavTransition.ClassicActivityOpen`：
+ *      `translationX = (1f - progress) * driftPx`，drift = 96dp，
+ *      时长 = `ClassicActivityMotion` 的 450ms。
  */
 private class NavAnimSpec(
     /** 进场页滑入距离（占屏宽的比例；AOSP 是 96dp，调用时再换算成比例）。 */
     val enterFraction: Float,
     /** 被覆盖页（底色层）的视差距离（占屏宽比例）。 */
     val coverFraction: Float,
-    /** 被覆盖页的最终不透明度（miuix 是 0.9，aosp 保持 1）。 */
+    /** 被覆盖页的最终不透明度。 */
     val coverAlpha: Float,
     /** 时长（毫秒）。 */
     val durationMs: Int,
 )
 
-/** 取当前设置对应的转场参数（跟随 «设置 → 过渡动画»）。 */
-private fun navAnimSpecOf(anim: PageTransitionAnimation, widthPx: Float, density: Float): NavAnimSpec =
+/** 取当前设置对应的转场参数（跟随 «设置 → 过渡动画»；数值取自 AppNavTransition）。 */
+private fun navAnimSpecOf(
+    anim: PageTransitionAnimation,
+    widthPx: Float,
+    /** AOSP 的 96dp 已经换算好的像素值（CompositionLocal 只能在 composable 里读，故由调用方传入）。 */
+    driftPx: Float,
+): NavAnimSpec =
     when (anim) {
         // miuix：整屏滑 + 被覆盖页 0.25 宽视差、轻微淡出
         PageTransitionAnimation.MIUIX -> NavAnimSpec(
             enterFraction = 1f,
-            coverFraction = 0.25f,
-            coverAlpha = 0.9f,
-            durationMs = 450,
+            coverFraction = MiuixCoverParallax,
+            coverAlpha = MiuixCoverAlpha,
+            durationMs = MiuixTransitionDurationMs,
         )
         // aosp：96dp 横向漂移（不是整屏滑），被覆盖页不视差
         PageTransitionAnimation.AOSP -> NavAnimSpec(
-            enterFraction = (96f * density) / widthPx.coerceAtLeast(1f),
+            enterFraction = driftPx / widthPx.coerceAtLeast(1f),
             coverFraction = 0f,
             coverAlpha = 1f,
-            durationMs = 450,
+            durationMs = AospTransitionDurationMs,
         )
     }

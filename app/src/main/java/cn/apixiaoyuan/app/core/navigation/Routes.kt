@@ -43,7 +43,17 @@ sealed interface Route : NavKey
 @Serializable
 data object RouteHome : Route
 
-/** 接口（Tab 根页）。 */
+/**
+ * 「接口控制台」路由（★ 2026-10-03 起**不再是 Tab 根页、也无任何入口**）。
+ *
+ * 历史：它原本是四 Tab 之一（首页/接口/请求台/设置）的根页；后来改为
+ * 首页快捷入口 + 独立二级页（`ApiScreen`）。2026-10-03 按用户要求
+ * 「把功能页没有实际作用以及后台接口的功能删掉（只在 ui 层）」
+ * 摘掉了**首页快捷入口**与 `AppNavHost` 里的页面注册。
+ *
+ * ⚠️ 路由声明本身**保留**：删掉它就要连带删 `ApiScreen` 的签名，
+ * 而用户的边界是「只在 ui 层」—— 底层与页面源码都不动，随时可恢复。
+ */
 @Serializable
 data object RouteApi : Route
 

@@ -2,6 +2,7 @@ package cn.apixiaoyuan.app.core.pk.host
 
 import android.content.Context
 import android.util.Log
+import cn.apixiaoyuan.app.core.log.AppLogger
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -79,22 +80,19 @@ object NodeRuntime {
 
         val exe = nodeExe(ctx)
         if (!exe.exists()) {
-            Log.e(TAG, "找不到 node 可执行文件：${exe.absolutePath}（jniLibs 的 libnode.so 没打进包？）")
+            logE("找不到 node 可执行文件：${exe.absolutePath}（jniLibs 的 libnode.so 没打进包？）")
             return false
         }
         val server = File(workspaceDir, "server.js")
         if (!server.exists()) {
-            Log.e(TAG, "找不到 server.js：${server.absolutePath}")
+            logE("找不到 server.js：${server.absolutePath}")
             return false
         }
 
         val dataDir = File(workspaceDir, "data").apply { mkdirs() }
 
         return runCatching {
-            val pb = ProcessBuilder(
-                exe.absolutePath,
-                server.absolutePath,
-            )
+            val pb = ProcessBuilder(exe.absolutePath, server.absolutePath)
             pb.directory(workspaceDir)
             pb.environment().apply {
                 // ★ 库搜索路径：nativeLibraryDir + /system/lib64（见 libPath 的注释）
@@ -115,21 +113,37 @@ object NodeRuntime {
             val p = pb.start()
             process = p
 
-            // 后台把 stdout 转到日志（不读会阻塞子进程）
+            // ★★ node 的 stdout/stderr **必须落盘**（2026-10-03 教训）。
+            //
+            // 初版只打 `android.util.Log`，而 logcat 是**环形缓冲**、很快被冲掉；
+            // 真机排障时 `grep NodeRuntime` 在文件日志里**一个字都没有** ——
+            // 只能看到上层那句「端口没响应」，完全不知道 node 侧发生了什么
+            // （CANNOT LINK / 缺库 / 端口占用 / 崩溃…）。
+            //
+            // 现在：logcat + 文件日志（AppLogger）双写。
+            // pk-node 自己会打印自检结果、监听地址、错误原因，这些是最关键的证据。
             Thread {
                 runCatching {
                     p.inputStream.bufferedReader().forEachLine { line ->
                         Log.i(TAG, line)
+                        // pk-node 的启动横幅很重要：自检结果 / 监听地址 / 联动令牌。
+                        if (line.isNotBlank()) AppLogger.i(TAG, line)
                     }
                 }
             }.apply { isDaemon = true; name = "pk-node-stdout" }.start()
 
-            // 注意：Android 上没有 java.lang.Process.pid()（那是 Java 9+ API），
-            // 所以这里不打 pid，只报存活状态与工作目录。
-            Log.i(TAG, "内置 node 已启动：alive=${p.isAlive} port=$DEFAULT_PORT dir=${workspaceDir.absolutePath}")
+            // 进程退出也要记 —— 「起来了又秒退」是最难查的一类。
+            Thread {
+                runCatching {
+                    val code = p.waitFor()
+                    AppLogger.w(TAG, "内置 node 已退出：exitCode=$code")
+                }
+            }.apply { isDaemon = true; name = "pk-node-wait" }.start()
+
+            logI("内置 node 已启动：alive=${p.isAlive} port=$DEFAULT_PORT dir=${workspaceDir.absolutePath}")
             true
         }.getOrElse {
-            Log.e(TAG, "启动内置 node 失败：${it.message}", it)
+            logE("启动内置 node 失败：${it.message}", it)
             false
         }
     }
@@ -142,40 +156,73 @@ object NodeRuntime {
             p.destroy()
             if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly()
         }.onFailure { Log.w(TAG, "停止内置 node 失败：${it.message}") }
-        Log.i(TAG, "内置 node 已停止")
+        logI("内置 node 已停止")
     }
 
     /**
-     * 等内置服务就绪（轮询 `/api/system` 直到有响应）。
+     * 等内置服务就绪。
      *
-     * 为什么不只等端口：node 起 listener 之后还要初始化 DB/各种桥，
-     * 立刻访问 H5 会拿到 500。用一次真实 HTTP 探活更可靠。
+     * ## ★ 探测哪一个路径（2026-10-03 真机 bug 的根因）
+     *
+     * 初版探的是 **根路径 `/`**，判定 `200..399` 算就绪 —— 而
+     * **pk-node 根本没有 `/` 路由，返回 404**，于是：
+     * 服务明明已经在正常监听（`netstat` 可见 `127.0.0.1:8792 LISTEN`），
+     * 却被判为「没响应」，白等满超时后报「内置服务启动失败」。
+     * 真机截图就是这个症状。
+     *
+     * 现在的判定：
+     *  1. 先看**进程还活着**（死了立刻返回，不用等满超时）；
+     *  2. 探 `/api/link/handshake`（**不需要登录**，只要带对令牌就 200，
+     *     见 pk-node `server.js` 的 `needAuth` 豁免名单）。
+     *
+     * 返回码判定放宽为 **< 500 即算「HTTP 栈活着」**：
+     * 哪怕令牌不对（403）、路径变了（404），也说明 listener 已经在服务请求了 ——
+     * 「就绪」要回答的问题是「端口通不通」，不是「业务对不对」。
      *
      * @param timeoutMs 最长等待
      * @return true = 已就绪
      */
     fun awaitReady(timeoutMs: Long = 20_000): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
+        var lastCode = -1
         while (System.currentTimeMillis() < deadline) {
-            if (!isRunning) return false
-            if (probeOnce()) return true
+            // 进程死了就别等了 —— 直接失败，把错误留给上层日志
+            if (!isRunning) {
+                logE("等待就绪期间 node 进程已退出（见上方 node 输出日志）")
+                return false
+            }
+            lastCode = probe()
+            if (lastCode in 1..499) return true
             runCatching { Thread.sleep(300) }
         }
+        logE("等待就绪超时（${timeoutMs}ms），最后一次探测返回=$lastCode")
         return false
     }
 
-    /** 探一次端口是否可用。 */
-    private fun probeOnce(): Boolean = runCatching {
-        val conn = (URL("http://127.0.0.1:$DEFAULT_PORT/").openConnection() as HttpURLConnection).apply {
+    /** 探一次服务。返回 HTTP 状态码；连不上返回 -1。 */
+    private fun probe(): Int = runCatching {
+        val conn = (URL("http://127.0.0.1:$DEFAULT_PORT/api/link/handshake")
+            .openConnection() as HttpURLConnection).apply {
             connectTimeout = 800
             readTimeout = 800
             requestMethod = "GET"
+            // 带上令牌，让 403 变成 200（更干净地证明整条链路通）
+            setRequestProperty("X-PK-Link", PkNodeLink.LINK_TOKEN)
         }
         try {
-            // 200 或 302 都算「服务活着」
-            conn.responseCode in 200..399
+            conn.responseCode
         } finally {
             conn.disconnect()
         }
-    }.getOrDefault(false)
+    }.getOrDefault(-1)
+
+    private fun logI(msg: String) {
+        Log.i(TAG, msg)
+        AppLogger.i(TAG, msg)
+    }
+
+    private fun logE(msg: String, t: Throwable? = null) {
+        Log.e(TAG, msg, t)
+        AppLogger.e(TAG, msg, t)
+    }
 }

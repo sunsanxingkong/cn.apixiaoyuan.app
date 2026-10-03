@@ -88,14 +88,21 @@ fun LogScreen(navController: AppNavController) {
     var levels by remember { mutableStateOf(emptySet<String>()) }
     var keyword by remember { mutableStateOf("") }
     var tagQuery by remember { mutableStateOf("") }
+    // ★ 折叠开关（2026-10-03 用户要求）：把连续重复的日志显示成「日志（×次数）」。
+    var collapse by remember { mutableStateOf(true) }
     var hint by remember { mutableStateOf<String?>(null) }
     // 过滤结果。refreshToken 变化触发重新查询。
     var refreshToken by remember { mutableIntStateOf(0) }
     var entries by remember { mutableStateOf<List<AppLogger.Entry>>(emptyList()) }
     var rawCrash by remember { mutableStateOf("") }
-    LaunchedEffect(kind, levels, keyword, tagQuery, refreshToken) {
+    LaunchedEffect(kind, levels, keyword, tagQuery, collapse, refreshToken) {
         if (kind == 0) {
-            entries = AppLogger.query(levels = levels, tagQuery = tagQuery, keyword = keyword)
+            entries = AppLogger.query(
+                levels = levels,
+                tagQuery = tagQuery,
+                keyword = keyword,
+                collapse = collapse,
+            )
             rawCrash = ""
         } else {
             // 崩溃日志量小（每次崩溃一份），不做结构化过滤，整份展示。
@@ -120,11 +127,16 @@ fun LogScreen(navController: AppNavController) {
      * 查询只在「条数/最后一条时间戳发生变化」时才写状态，避免无谓重组
      * （否则每 600ms 都会触发一次 LazyColumn 重组，滚动动画会被打断）。
      */
-    LaunchedEffect(kind, levels, keyword, tagQuery) {
+    LaunchedEffect(kind, levels, keyword, tagQuery, collapse) {
         if (kind != 0) return@LaunchedEffect
         while (true) {
             kotlinx.coroutines.delay(600)
-            val fresh = AppLogger.query(levels = levels, tagQuery = tagQuery, keyword = keyword)
+            val fresh = AppLogger.query(
+                levels = levels,
+                tagQuery = tagQuery,
+                keyword = keyword,
+                collapse = collapse,
+            )
             // 仅当「条数变了」或「最后一条变了」才更新 —— 否则跳过，不打扰滚动。
             // （Entry 没有数值时间戳，用 raw 原文比对最稳：它含到毫秒的时间前缀。）
             if (fresh.size != entries.size ||
@@ -159,16 +171,27 @@ fun LogScreen(navController: AppNavController) {
                 onKeywordChange = { keyword = it },
                 tagQuery = tagQuery,
                 onTagQueryChange = { tagQuery = it },
+                collapse = collapse,
+                onCollapseChange = { collapse = it },
                 onRefresh = { refreshToken++ ; hint = "已刷新" },
                 onCopy = {
                     val text = if (kind == 0) {
-                        entries.joinToString("\n") { it.raw }
+                        // ★ 复制用 `display`（折叠时带 `（×N）`）—— 用户看到的与复制的要一致。
+                        //   若想拿逐字原文，关掉折叠再复制即可。
+                        entries.joinToString("\n") { e ->
+                            buildString {
+                                append(e.time)
+                                if (e.level != null) append(' ').append(e.level)
+                                if (e.tag != null) append('/').append(e.tag)
+                                append(": ").append(e.display)
+                            }
+                        }
                     } else {
                         rawCrash
                     }
                     copyToClipboard(context, text)
                     hint = if (kind == 0) {
-                        "已复制 ${entries.size} 条（当前过滤结果）"
+                        "已复制 ${entries.size} 行（当前过滤结果${if (collapse) "，已折叠" else ""}）"
                     } else {
                         "已复制崩溃日志"
                     }
@@ -179,6 +202,7 @@ fun LogScreen(navController: AppNavController) {
                     hint = "已清空"
                 },
                 count = if (kind == 0) entries.size else null,
+                collapsed = collapse,
                 hint = hint,
                 onDismissHint = { hint = null },
             )
@@ -241,10 +265,15 @@ private fun LogToolbar(
     onKeywordChange: (String) -> Unit,
     tagQuery: String,
     onTagQueryChange: (String) -> Unit,
+    /** 是否折叠连续重复的日志（UI 与查询共用同一个开关）。 */
+    collapse: Boolean,
+    onCollapseChange: (Boolean) -> Unit,
     onRefresh: () -> Unit,
     onCopy: () -> Unit,
     onClear: () -> Unit,
     count: Int?,
+    /** 折叠开关的当前值，仅用于提示文案。 */
+    collapsed: Boolean,
     hint: String?,
     onDismissHint: () -> Unit,
 ) {
@@ -265,6 +294,12 @@ private fun LogToolbar(
             ) {
                 Chip("运行日志", kind == 0) { onKindChange(0) }
                 Chip("崩溃日志", kind == 1) { onKindChange(1) }
+                Chip(
+                    // 用户要求的显示形态就叫「日志（×次数）」——开关文案直接对齐它。
+                    label = if (collapse) "折叠重复 ✓" else "折叠重复",
+                    selected = collapse,
+                    onBefore = onDismissHint,
+                ) { onCollapseChange(!collapse) }
                 Chip("刷新", false, onDismissHint, onRefresh)
                 Chip("复制", false, onDismissHint, onCopy)
                 Chip("清空", false, onDismissHint, onClear)
@@ -308,7 +343,8 @@ private fun LogToolbar(
 
                 count?.let {
                     MiuixText(
-                        text = "命中 $it 条（最多显示最近 ${AppLogger.DEFAULT_QUERY_LIMIT} 条）",
+                        text = "命中 $it 行（已折叠连续重复${if (collapsed) "" else "：关"}；" +
+                            "最多显示最近 ${AppLogger.DEFAULT_QUERY_LIMIT} 条）",
                         fontSize = 11.sp,
                         color = MiuixTheme.colorScheme.onSurfaceContainerVariant,
                     )
@@ -336,16 +372,30 @@ private fun LogRow(entry: AppLogger.Entry, context: Context) {
         "I" -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    // 折叠过（重复 ≥2 次）的行：用**高亮底 + 次数徽标**，与普通行一眼区分。
+    val repeated = entry.repeat > 1
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .background(
-                if (copied) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surfaceContainerHigh
+                when {
+                    copied -> MaterialTheme.colorScheme.primaryContainer
+                    repeated -> MaterialTheme.colorScheme.surfaceContainerHighest
+                    else -> MaterialTheme.colorScheme.surfaceContainerHigh
+                }
             )
             .clickable {
-                copyToClipboard(context, entry.raw)
+                // 点一下复制这一条。折叠行带上 `（×N）`，与看到的一致。
+                copyToClipboard(
+                    context,
+                    buildString {
+                        append(entry.time)
+                        if (entry.level != null) append(' ').append(entry.level)
+                        if (entry.tag != null) append('/').append(entry.tag)
+                        append(": ").append(entry.display)
+                    },
+                )
                 copied = true
             }
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -375,6 +425,16 @@ private fun LogRow(entry: AppLogger.Entry, context: Context) {
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Medium,
                         color = levelColor,
+                    )
+                }
+                // ★ 用户要求的形态：重复的用「（×次数）」标出来。
+                if (repeated) {
+                    MiuixText(
+                        text = "（×${entry.repeat}）",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.tertiary,
                     )
                 }
             }

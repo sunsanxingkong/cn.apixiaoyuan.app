@@ -10,6 +10,7 @@ import cn.apixiaoyuan.app.core.account.SubAccountItem
 import cn.apixiaoyuan.app.core.auth.AuthRepository
 import cn.apixiaoyuan.app.core.model.UserVO
 import cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs
+import cn.apixiaoyuan.app.core.session.DeviceChainPool
 import cn.apixiaoyuan.app.core.session.SessionStore
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -306,13 +307,84 @@ class AccountViewModel : ViewModel() {
             message = "请先粘贴 Cookie 字符串"
             return
         }
-        val n = SessionStore.importCookieHeader(text)
-        if (n == 0) {
+        val lines = text.split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it.contains('=') }
+        if (lines.isEmpty()) {
             message = "没能解析出任何 cookie（应为 name=value; name2=value2 形态）"
             return
         }
-        cookieInput = ""
-        message = "已导入 $n 条 cookie。设备链与登录 cookie 两层齐备后，主域业务接口才可用。"
+
+        // ★★ 2026-10-03：**多条**与**单条**走不同路径，不能都走 importCookieHeader。
+        //
+        // ## 为什么不能逐行调 importCookieHeader（我第一版就是这么写错的）
+        //
+        // [SessionStore.importCookieHeader] 的语义是「**合并进当前会话**」：
+        // 它以「已存的整份 cookies」为底、按 **name** 覆盖，最后
+        // `DeviceChainPool.upsert(合并后的整份)`。
+        //
+        // 逐行调用时：第 1 行把 `ks_deviceid` 设成 A，第 2 行又按 name 覆盖成 B……
+        // 每行 upsert 的却是**同一份被反复覆盖的合并结果** → 31 条链最终只剩 1 条。
+        // 而且每一行都会**改坏当前登录会话**的 `ks_*`（最后一行说了算）。
+        //
+        // 正确做法（见下）：多条时**逐条独立入池**，且**不碰当前会话**。
+        if (lines.size == 1) {
+            // 单条：与旧行为完全一致 —— 既是「导入登录态」，也顺带入池。
+            val n = SessionStore.importCookieHeader(lines[0])
+            if (n == 0) {
+                message = "没能解析出任何 cookie（应为 name=value; name2=value2 形态）"
+                return
+            }
+            cookieInput = ""
+            message = "已导入 $n 条 cookie。设备链与登录 cookie 两层齐备后，主域业务接口才可用。"
+        } else {
+            // 多条：每行独立解析成一份设备链，各自入池（按 ks_deviceid 去重）。
+            //
+            // ⚠️ 刻意**不**改当前会话：批量灌设备链时把当前登录态的 `ks_*`
+            //    换成最后一行，只会让当前会话莫名变成「另一台设备」。
+            //    当前会话要不要套用某条链，由「设备链池」区自己决定
+            //    （`applyTo` / `applyToIfMissing` 的复用方）。
+            val parsed = lines.mapNotNull { line ->
+                val map = line.split(';')
+                    .mapNotNull { kv ->
+                        val t = kv.trim()
+                        val eq = t.indexOf('=')
+                        if (eq <= 0) null else t.substring(0, eq).trim() to t.substring(eq + 1).trim()
+                    }
+                    .filter { (k, v) -> k.isNotEmpty() && v.isNotEmpty() }
+                    .toMap()
+                if (map["ks_deviceid"].isNullOrBlank()) null else map
+            }
+            if (parsed.isEmpty()) {
+                message = "这 ${lines.size} 行里没有一行含 ks_deviceid —— 批量导入只认设备链"
+                return
+            }
+            var added = 0
+            var updated = 0
+            parsed.forEach { map ->
+                val cookies = map.map { (k, v) ->
+                    SessionStore.CookieEntry(
+                        domain = "yuanfudao.com",
+                        name = k,
+                        value = v,
+                        path = "/",
+                        // 导入的设备链不设过期：原版这些字段的 expiresAt 是远未来，
+                        // 导入时无从得知，留 0 让 CookieJar 当 session cookie 处理。
+                        expiresAt = 0L,
+                        hostOnly = false,
+                        httpOnly = true,
+                        persistent = true,
+                        secure = false,
+                    )
+                }
+                val before = DeviceChainPool.listAll().size
+                DeviceChainPool.upsert(label = "导入", cookies = cookies)
+                if (DeviceChainPool.listAll().size > before) added++ else updated++
+            }
+            cookieInput = ""
+            message = "已批量导入设备链：新增 $added 条、更新 $updated 条（共 ${parsed.size} 条，" +
+                "按 ks_deviceid 去重）；未改动当前登录会话。"
+        }
         refresh()
     }
 

@@ -113,14 +113,38 @@ object AppLogger {
         val level: String?,
         val tag: String?,
         val message: String,
+        /**
+         * 「这条连续重复了几次」。
+         *
+         * ## 为什么要它（2026-10-03 用户要求）
+         *
+         * > 「日志里重复刷屏的用这种形式显示『日志（×次数）』」
+         *
+         * 本项目最容易刷屏的就是**自激环**类问题（`saveCookies` → bump →
+         * 重拉列表 → 响应 → `saveCookies`…），真机上一条同样的
+         * `LeoNet: GET /user-info/context/batchGet` 能连刷上千行，
+         * 把有价值的日志全冲走。折叠后一行 `（×1247）` 反而信息量更大。
+         *
+         * 由 [query] 在折叠模式下填充；[parse] 产出的原始行恒为 1。
+         */
+        val repeat: Int = 1,
     ) {
-        /** 原文（日志页需要展示与复制）。 */
+        /** 原文（日志页需要展示与复制）。**不含**折叠次数，保持逐字一致。 */
         val raw: String get() = buildString {
             append(time)
             if (level != null) append(' ').append(level)
             if (tag != null) append('/').append(tag)
             append(": ").append(message)
         }
+
+        /**
+         * 展示用文本：折叠时在**末尾**追加 `（×N）`。
+         *
+         * 用户给的格式就是「日志（×次数）」—— 追加在正文尾部，
+         * 而不是插到时间/级别那一段，这样「正文」仍旧一眼可读。
+         */
+        val display: String
+            get() = if (repeat > 1) "$message（×$repeat）" else message
     }
 
     /** 行首形态：`09-27 18:31:02.123 I/Tag: msg`。 */
@@ -169,12 +193,25 @@ object AppLogger {
      * @param tagQuery tag 子串（忽略大小写）；空白 = 不过滤
      * @param keyword  正文子串（忽略大小写，匹配 message + tag）；空白 = 不过滤
      * @param limit    最多返回多少条（取**最新**的 N 条）
+     * @param collapse 是否把**连续重复**的行折叠成一条（带 `（×N）`）。
+     *                 UI 侧默认开 —— 见 [Entry.repeat] 的说明。
+     *
+     * ## 折叠规则（有意做得保守）
+     *
+     * 只折叠**严格相邻**且 **tag + level + message 三者完全相同**的行：
+     *  - 只比 message 会把「同文案不同 tag」误合并（两个模块各刷一条）；
+     *  - 不看时间 —— 时间本来就不同，看了就永远合不上；
+     *  - 不做「隔着几行也算」的窗口折叠（那会把有意义的交错日志吃掉）。
+     *
+     * 折叠后**保留最后一条的时间**：`（×N）` 表示「到这一刻已连刷 N 次」，
+     * 对判断「还在刷 / 已经停了」更有用。
      */
     fun query(
         levels: Set<String> = emptySet(),
         tagQuery: String = "",
         keyword: String = "",
         limit: Int = DEFAULT_QUERY_LIMIT,
+        collapse: Boolean = true,
     ): List<Entry> {
         val text = synchronized(lock) { buffer.joinToString("\n") }
             .ifBlank { runFiles().firstOrNull()?.let { read(it) }.orEmpty() }
@@ -189,7 +226,46 @@ object AppLogger {
                     it.tag?.contains(keyword, ignoreCase = true) == true
             }
         }
-        return list.takeLast(limit)
+        val tail = list.takeLast(limit)
+        return if (collapse) collapseRuns(tail) else tail
+    }
+
+    /**
+     * 把**连续重复**的日志折叠：同一组只保留最后一条，并记下次数。
+     *
+     * ## 为什么保留「最后一条」而不是「第一条」
+     *
+     * 折叠后那一行显示的是**该组里时间最新的那条**（时间即「最后一次出现」），
+     * 配上 `（×N）` 读起来就是「到这一刻为止连刷了 N 次」——
+     * 这对判断「还在刷 / 已经停了」比「第一次出现的时间」有用得多。
+     *
+     * ## 容易写错的地方（我第一版就写错了）
+     *
+     * 用「边遍历边替换 `out.last()`」的写法，在**第一组就重复**时
+     * `out` 还是空的 → `out[out.lastIndex]` = `out[-1]` → 越界崩溃。
+     * 正确做法是：`cur` 只在该组**结束时**才入队（循环后补一次收尾）。
+     *
+     * ⚠️ 顺序要紧：调用方是先 `takeLast(limit)` 再折叠（而不是折叠再截断）。
+     * 反过来会让截断把一条 `（×3000）` 砍成 `（×3）`，数字失去意义。
+     */
+    private fun collapseRuns(list: List<Entry>): List<Entry> {
+        if (list.isEmpty()) return emptyList()
+        val out = ArrayList<Entry>(list.size)
+        var cur: Entry = list[0]
+        var run = 1
+        for (i in 1 until list.size) {
+            val e = list[i]
+            if (e.tag == cur.tag && e.level == cur.level && e.message == cur.message) {
+                run++
+                cur = e.copy(repeat = run)
+            } else {
+                out.add(cur)
+                cur = e
+                run = 1
+            }
+        }
+        out.add(cur)   // 收尾：最后一组
+        return out
     }
 
     /** 出现过的 tag（按出现次数倒序），供日志页做 tag 筛选。 */

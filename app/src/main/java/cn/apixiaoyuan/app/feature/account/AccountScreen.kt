@@ -303,9 +303,9 @@ fun AccountScreen(
                     value = viewModel.cookieInput,
                     onValueChange = { viewModel.cookieInput = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = "sid=...; ks_sess=...; ks_deviceid=...（可只粘这三个）",
+                    label = "一行一条：单条=导入登录态；多条=批量灌设备链",
                     useLabelAsPlaceholder = true,
-                    maxLines = 4,
+                    maxLines = 8,
                 )
                 Button(
                     onClick = { viewModel.importCookies() },
@@ -314,8 +314,10 @@ fun AccountScreen(
                     Text("导入")
                 }
                 Text(
-                    text = "导入只覆盖同名项，不会清掉本项目登录已拿到的 cookie —— " +
-                        "两层必须共存。设备链也不会被服务端的清除指令抹掉。\n" +
+                    text = "★ 支持一次粘贴多条（每行一条，适合批量灌设备链）。\n" +
+                        "单行 = 导入登录态（合并进当前会话，只覆盖同名项，不会清掉已有 cookie）。\n" +
+                        "多行 = 逐条解析并各自并入「设备链池」（按 ks_deviceid 去重），" +
+                        "不改动当前登录会话。\n" +
                         "注：练习类接口在两层齐备后仍可能返回 417（solar-encoder），" +
                         "那是编码层校验，与登录态无关。",
                     color = MiuixTheme.colorScheme.onSurfaceContainerVariant,

@@ -384,31 +384,28 @@ fun PkH5Screen(
             )
         }
 
-        // 标题栏（返回按钮 + 标题 + 加载圈）
+        // ★ 2026-10-03（用户要求：「顶部不要有文字只要纯色填充」）：
         //
-        // ⚠️ 它必须在内容区**之外**：内置服务启动中 / 出错时下面会盖一层
-        // 提示卡，若提示卡连标题栏一起盖住，用户就连「返回」都点不到了
-        // （实测踩过：卡在启动失败时只能杀进程）。
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = { goBackOrFinish(webView, onFinish) }) {
-                Icon(imageVector = AppIcons.Back, contentDescription = "返回")
-            }
-            Text(
-                text = viewModel.webTitle,
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            if (viewModel.loading) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            }
-        }
+        // 这里**原先有一条标题栏**（返回按钮 + 网页标题 + 加载圈）。已整条移除，
+        // 顶上只留纯色（就是下面 Column 的 background(bg)，也就是 H5 自己的底色）。
+        //
+        // 三件事都要交代清楚，否则会变成「功能没了」：
+        //
+        //  ① **返回**：本来就有
+        //     [BackHandler]（系统返回键 → [goBackOrFinish]）+ 左滑返回
+        //     （`entry<RoutePk>(swipeDismiss = NavSwipeDirection.LeftToRight)`），
+        //     所以那个返回按钮是**冗余**的，删掉不丢能力。
+        //
+        //  ② **加载进度**：原本只在「首次加载且还没 loadUrl 过」时出现，
+        //     且就是这条进度条（不是标题栏里的圈）。保留，仍只在首屏显示。
+        //
+        //  ③ **纯色填充怎么保证**：状态栏区域（edge-to-edge 下浮在内容之上）
+        //     看到的是根 Column 的 `background(bg)`，而 `bg` 来自
+        //     [probeH5PageColor] 探测到的**H5 页面自己的底色**
+        //     —— 所以顶上不会有任何文字，且颜色与页面一致。
+        //
+        //  ④ 那个 `WebView` 的 `<title>` 仍会更新 [viewModel.webTitle]，
+        //     只是不再显示（留着无副作用，别的页面还能用）。
 
         // ---- 内容区（WebView + 各种覆盖层）----
         Box(modifier = Modifier.weight(1f)) {

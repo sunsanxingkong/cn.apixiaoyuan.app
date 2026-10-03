@@ -121,6 +121,8 @@ class PkGrindViewModel : ViewModel() {
                 AccountRepository.switchTo(item)
                 progress = ""
                 message = "已切换到 ${item.nickname}"
+                // ★ 2026-10-03：切号后重推身份给内置 pk-node（见 PkHostOrchestrator.relinkAsync）
+                runCatching { cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator.relinkAsync() }
                 refreshAll()
             } catch (c: CancellationException) {
                 throw c

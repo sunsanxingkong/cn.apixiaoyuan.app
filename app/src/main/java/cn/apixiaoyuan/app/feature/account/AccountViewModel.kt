@@ -117,6 +117,8 @@ class AccountViewModel : ViewModel() {
             loading = false
             result.onSuccess { newId ->
                 message = "已切换到「${item.nickname}」（userid=$newId）"
+                // ★ 2026-10-03：切号后重推身份给内置 pk-node（见 PkHostOrchestrator.relinkAsync）
+                runCatching { cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator.relinkAsync() }
                 refresh()
             }.onFailure {
                 message = "切换失败：${it.message ?: it}"

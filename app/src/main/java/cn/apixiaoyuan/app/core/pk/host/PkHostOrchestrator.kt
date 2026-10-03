@@ -106,12 +106,36 @@ object PkHostOrchestrator {
     private var startedBlocking = false
 
     /**
+     * 首次调用时留下的 Application Context（供 [relinkAsync] 不带参数使用）。
+     *
+     * ⚠️ Application Context，不是 Activity —— 这里只用来跑后台 IO，不碰 UI。
+     */
+    @Volatile
+    private var appCtx: android.content.Context? = null
+
+    /**
+     * 最近一次**推给 pk-node** 的 App 身份（`SessionStore.yfdU`）。
+     *
+     * 用途（2026-10-03，修「切换子账号后 pk-node 没有跟着切」）：
+     * 用它判断「App 当前是谁」与「pk-node 里那个是谁」是否还一致。
+     * 不一致才重新推 + 重算 [State.Ready.leoAccountId]，避免每次进页都白推一遍
+     * （推账号要真打小猿接口，一次好几秒）。
+     */
+    @Volatile
+    private var syncedYfdU: Long = 0
+
+    /** App 当前身份（没有则 0）。 */
+    private fun currentYfdU(): Long =
+        runCatching { SessionStore.yfdU }.getOrNull() ?: 0L
+
+    /**
      * 起一遍（幂等，异步）。
      *
      * 由 `PkScreen` 在进入 PK 页时调用；也由 `App.onCreate` 提前预热
      * （内置换机/悬浮球后台挂机时不进 PK 页也要服务在跑）。
      */
     fun startAsync(ctx: Context) {
+        appCtx = ctx.applicationContext
         if (started) return
         synchronized(this) {
             if (started) return
@@ -119,6 +143,37 @@ object PkHostOrchestrator {
         }
         val app = ctx.applicationContext
         scope.launch { startBlocking(app) }
+    }
+
+    /**
+     * ★ 身份变了（切子账号 / 重新登录）→ 重跑一遍联动，把新身份推给 pk-node。
+     *
+     * ## 为什么要单独一个入口
+     *
+     * [startAsync] / [startBlocking] 都有「只跑一次」的门禁（[started] / [startedBlocking]），
+     * 而切号之后**必须**重算 H5 的 `leoAccountId`（它决定 H5 用 pk-node 库里哪条账号，
+     * 那条账号里存的是 cookie）。所以这里把两个门禁复位再走一遍 start。
+     *
+     * ## 为什么服务没跑就跳过
+     *
+     * 用户可能从不逛 PK 页（那时内置 node 根本没起，120MB 的 node 不该为切号而拉起）。
+     * 等他真进 PK 页时，[startBlocking] 里的「身份不一致就推」逻辑会自然补上。
+     *
+     * @return true = 已安排重联动；false = 内置 node 没在跑，跳过
+     */
+    fun relinkAsync(): Boolean {
+        val ctx = appCtx ?: return false
+        if (!NodeRuntime.isRunning) {
+            AppLogger.i(TAG, "切号后未联动：内置 node 没在跑，等进 PK 页时再补")
+            return false
+        }
+        synchronized(this) {
+            started = false
+            startedBlocking = false
+        }
+        AppLogger.i(TAG, "切号后重跑联动（App 身份 → pk-node）")
+        startAsync(ctx)
+        return true
     }
 
     /**
@@ -138,6 +193,7 @@ object PkHostOrchestrator {
             startedBlocking = true
         }
         val app = ctx.applicationContext
+        appCtx = app
         state = State.Starting
 
         // ---- ① 工作区（解压 / 命中版本戳）----
@@ -189,12 +245,26 @@ object PkHostOrchestrator {
         // 进 PK 页都重跑一遍（那会真打小猿接口，慢且没必要）。
         // 顺便记住 admin 凭据（管理后台网页要自动登录）。
         adminCredentials = hs.adminUser?.let { u -> hs.adminPass?.let { p -> u to p } }
-        if (hs.accounts.isEmpty()) {
-            val res = PkNodeSync.syncNow(hs.adminUser, hs.adminPass)
-            AppLogger.i(TAG, "自动推送登录态：${res.message}")
+
+        // ★★ 2026-10-03 修「切换子账号后 pk-node 没有跟着切」
+        //
+        // 原来的门禁是「**它库里一个账号都没有**才推」。于是：
+        //   - 用户切了子账号 → App 的 cookie / userid 变了，但 pk-node 里那条还是**旧 cookie**
+        //     → H5 仍以切换前那个身份发请求 → 看起来就是「没跟着切」；
+        //   - 而且 `startBlocking` 只跑一次（[started] 门禁），此后进页根本不会重算
+        //     [State.Ready.leoAccountId]。
+        //
+        // 现在改成「**身份变了就推**」：App 当前 yfdU ≠ 上次推过去的 yfdU 时为真。
+        // 没变就跳过 —— 否则每次进 PK 页都要真打小猿接口（probe + profile + 子账号），好几秒。
+        val want = currentYfdU()
+        val needPush = hs.accounts.isEmpty() || (want > 0L && want != syncedYfdU)
+        if (needPush) {
+            val res = PkNodeSync.syncNow(hs.adminUser, hs.adminPass, force = hs.accounts.isNotEmpty())
+            AppLogger.i(TAG, "自动推送登录态（want=$want last=$syncedYfdU）：${res.message}")
             // 推完重新 handshake 一次，才能拿到刚导入账号的**主键 id**
             // （决定 H5 的 leoAccountId）与 yfdU（灌 cookie 用）
             PkNodeLink.handshake()?.let { hs = it }
+            if (res.loggedIn) syncedYfdU = want
         }
 
         // 把 pk-node 的账号**导入 App 登录态**（用户要求：「管理员的小猿口算账号

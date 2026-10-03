@@ -221,28 +221,15 @@ fun PkNodeScreen(navController: AppNavController) {
             )
         }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = {
-                if (webView.canGoBack()) webView.goBack() else navController.popBackStack()
-            }) {
-                Icon(imageVector = AppIcons.Back, contentDescription = "返回")
-            }
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            if (progress in 1..99) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            }
-        }
+        // ★ 2026-10-03（用户要求：「顶部不要有文字只要纯色填充」）：
+        //
+        // 原先的标题栏（返回 + 标题 + 加载圈）已整条移除，顶上只留纯色
+        // （根 Column 的 `background(bg)`，即探测到的网页底色）。
+        //
+        //  · 返回：已有 [BackHandler]（系统返回键 → canGoBack/popBackStack）
+        //    与左滑返回，那条按钮是冗余的；
+        //  · 进度：首屏那条 LinearProgressIndicator 保留（就在本行上方）；
+        //  · `title` 仍由 onPageFinished 更新，只是不再显示。
 
         Box(modifier = Modifier.weight(1f)) {
             AndroidView(

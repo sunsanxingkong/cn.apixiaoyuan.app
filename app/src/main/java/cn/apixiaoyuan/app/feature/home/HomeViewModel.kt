@@ -128,6 +128,10 @@ class HomeViewModel : ViewModel() {
             switchingUserId = null
             result.onSuccess { newId ->
                 message = "已切换到「${item.nickname}」"
+                // ★ 2026-10-03：切号后把新身份重推给内置 pk-node（否则 PK H5 还在用
+                //   切换前那条账号的 cookie → 看起来就是“pk-node 没跟着切”）。
+                //   内部有「node 没在跑就跳过」判断，不会为切号白拉起 120MB 的 node。
+                runCatching { cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator.relinkAsync() }
                 // ★ 2026-09-30：切换成功后**立刻重拉一次**，不等 stateRevision 的 250ms 去抖。
                 //   用户反馈「切换有延迟」—— 那 250ms 去抖 + 一轮网络往返就是延迟来源。
                 //   这里主动刷新，感知上「点完马上更新」。

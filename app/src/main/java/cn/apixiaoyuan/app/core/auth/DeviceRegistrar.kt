@@ -63,19 +63,30 @@ object DeviceRegistrar {
      * @return true 表示「已具备设备链」（本来就有，或本次注册成功）
      */
     suspend fun ensureRegistered(): Boolean {
-        // 已有设备链：直接用（同时顺手沉淀进池）。
+        // ① 已有设备链：直接用（同时顺手沉淀进池）。
         if (SessionStore.cookie("ks_deviceid") != null) {
             persistToPool("当前会话")
             return true
         }
-        // 没有 → 先试设备注册（官方通道）。
-        if (registerDevice()) {
+        // ② 试设备注册（官方通道）。
+        //
+        // ⚠️ registerDevice() 返回 true **只代表 HTTP 2xx**，不代表服务端真的下发了
+        //    `ks_*` —— 实测存在「2xx 但 Set-Cookie 里没有 ks_*」的情况
+        //    （本文件下方那条日志「可能服务端未下发」就是为它写的）。
+        //    所以这里**不能**直接 return，必须落到 ③ 的终检。
+        val registered = registerDevice()
+        if (registered) persistToPool("设备注册")
+
+        // ③ ★ 终检（2026-10-03 修「内置设备链不是所有用户都能用」）
+        //
+        //    无论注册是否「成功」，只要会话里**仍然没有** ks_deviceid，就从池里套一份。
+        //    内置的 3 条在 App 启动时已由 [DeviceChainSeed] 入池，这里必须真正用上 ——
+        //    否则它们只是「躺着」：会话始终没有 ks_*，PK 出题恒 400、batchGet 恒 401。
+        if (SessionStore.cookie("ks_deviceid") != null) {
             persistToPool("设备注册")
             return true
         }
-        // 注册失败（可能被风控/网络）→ 从池里取一份套上。
-        // 对齐 pk-node 的 applyDeviceChain：池空则回退「从已有账号借」。
-        return applyFromPool()
+        return applyFromPool(force = true)
     }
 
     /**
@@ -96,14 +107,18 @@ object DeviceRegistrar {
     /**
      * 从设备链池取一份套用到当前会话。
      *
+     * @param force 强制套用：**不**因「会话里已缺链」之外的任何原因跳过。
+     *              当前两者判据一致（都看 `ks_deviceid` 是否存在），
+     *              保留该参数是为了语义清晰 —— 调用方（[ensureRegistered] 的终检）
+     *              已经确认过「没有链」，是**必须套上**而非「缺了才套」。
      * @return true 表示成功补上（会话里已有 `ks_deviceid`）。
      */
-    private fun applyFromPool(): Boolean {
+    private fun applyFromPool(force: Boolean = false): Boolean {
         return runCatching {
             val current = SessionStore.loadCookies()
             val res = DeviceChainPool.applyToIfMissing(current)
             if (!res.applied) {
-                Log.w(TAG, "设备链池补链失败：${res.from}")
+                Log.w(TAG, "设备链池补链失败：${res.from}（force=$force）")
                 return@runCatching false
             }
             SessionStore.saveCookies(res.cookies)

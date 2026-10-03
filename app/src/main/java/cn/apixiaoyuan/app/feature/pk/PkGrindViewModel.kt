@@ -3,10 +3,12 @@ package cn.apixiaoyuan.app.feature.pk
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.apixiaoyuan.app.core.account.AccountRepository
 import cn.apixiaoyuan.app.core.account.SubAccountItem
+import cn.apixiaoyuan.app.core.auth.DeviceRegistrar
 import cn.apixiaoyuan.app.core.pk.PkBattleEngine
 import cn.apixiaoyuan.app.core.pk.PkBattleRepository
 import cn.apixiaoyuan.app.core.pk.PkMode
@@ -18,7 +20,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class PkGrindViewModel : ViewModel() {
-
     var points by mutableStateOf<List<PkPointItem>?>(null)
         private set
 
@@ -67,6 +68,14 @@ class PkGrindViewModel : ViewModel() {
         currentUserId = SessionStore.yfdU
         viewModelScope.launch {
             try {
+                // ★ 2026-10-03：进页面就先确保有设备链。
+                //
+                // PK 出题（`/leo-game-pk/.../match`）**缺 `ks_*` 恒 400**，
+                // 而登录只下发 `sid`。内置的 3 条链已在 App 启动时入池，
+                // 这里调一次 ensureRegistered 让它们**真正被套用**——
+                // 否则新用户进来就是「一直 400」，且完全不知道缺的是设备链。
+                runCatching { DeviceRegistrar.ensureRegistered() }
+                    .onFailure { Log.w(TAG, "设备链准备失败：${it.message}") }
                 val grade = SessionStore.grade() ?: DEFAULT_GRADE
                 val home = PkBattleRepository.fetchMathHome(grade)
                 points = home.pointList
@@ -203,6 +212,9 @@ class PkGrindViewModel : ViewModel() {
     }
 
     companion object {
+        /** 日志 TAG（设备链补链失败等诊断用）。 */
+        private const val TAG = "PkGrindVM"
+
         private const val DEFAULT_GRADE = 2
     }
 }

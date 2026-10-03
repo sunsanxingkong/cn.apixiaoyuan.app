@@ -44,6 +44,16 @@ sealed interface Route : NavKey
 data object RouteHome : Route
 
 /**
+ * 「Linux 终端」二级页（★ 2026-10-03 新增）。
+ *
+ * 用户要求：「主页加入 liunx 终端入口」。
+ * 它跑的是 **Android 自带的 `/system/bin/sh`（toybox/mksh）**，
+ * 不是塞进去的发行版 —— 详见 `TerminalSession` 的 KDoc。
+ */
+@Serializable
+data object RouteTerminal : Route
+
+/**
  * 「接口控制台」路由（★ 2026-10-03 起**不再是 Tab 根页、也无任何入口**）。
  *
  * 历史：它原本是四 Tab 之一（首页/接口/请求台/设置）的根页；后来改为

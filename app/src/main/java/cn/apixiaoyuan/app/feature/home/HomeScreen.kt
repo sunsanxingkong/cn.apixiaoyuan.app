@@ -48,6 +48,7 @@ import cn.apixiaoyuan.app.core.navigation.RouteGrind
 import cn.apixiaoyuan.app.core.navigation.RouteLogin
 import cn.apixiaoyuan.app.core.navigation.RoutePk
 import cn.apixiaoyuan.app.core.navigation.RouteSamples
+import cn.apixiaoyuan.app.core.navigation.RouteTerminal
 import cn.apixiaoyuan.app.core.session.SessionStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -115,6 +116,9 @@ fun HomeScreen(navController: AppNavController) {
                 QuickEntry("接口控制台", "Api", "直接调用应用 OkHttp 打接口", RouteApi),
                 QuickEntry("练习", "Exercise", "任务卡 / 经验 / 英语章节", RouteExercise),
                 QuickEntry("口算 PK", "Pk", "H5 容器 + cookie 同步", RoutePk),
+                // ★ 2026-10-03 新增：Linux 终端（用户要求「主页加入 liunx 终端入口」）。
+                //   跑的是 Android 自带的 /system/bin/sh（toybox），不是塞进去的发行版。
+                QuickEntry("终端", "Linux", "内置 Linux shell：手动跑 node / 查进程 / 看服务", RouteTerminal),
                 QuickEntry("样本库", "Samples", "请求历史与回放", RouteSamples),
             )
 

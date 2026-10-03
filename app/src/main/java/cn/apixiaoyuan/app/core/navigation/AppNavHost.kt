@@ -78,6 +78,10 @@ fun AppNavHost(
             entry<RoutePk>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                 cn.apixiaoyuan.app.feature.pk.PkScreen(navController)
             }
+            // ★ 2026-10-03 新增：Linux 终端（主页快捷入口 → 这里）。
+            entry<RouteTerminal>(swipeDismiss = NavSwipeDirection.LeftToRight) {
+                cn.apixiaoyuan.app.feature.terminal.TerminalScreen(navController)
+            }
             entry<RouteExercise>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                 cn.apixiaoyuan.app.feature.exercise.ExerciseScreen(navController)
             }

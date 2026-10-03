@@ -11,7 +11,13 @@
            FOREGROUND_SERVICE + FOREGROUND_SERVICE_SPECIAL_USE → 前台服务本身
            POST_NOTIFICATIONS（API 33+ 运行时权限）           → 前台服务必须有可见通知
            SYSTEM_ALERT_WINDOW（特殊权限，需手动授予）        → 悬浮球（那只笔）
-         ---------------------------------------------------------------- -->
+
+         ⚠️ 注释里**不能出现连续两个连字符**（XML 规范禁止，会让 manifest
+            合并器报 MergeFailureException: Error parsing AndroidManifest.xml）。
+            这里原先用了一排「减号」当分隔线，导致 CI 从 #149 起一路红 ——
+            而本地 :app:compileDebugKotlin **不处理 manifest**，所以查不出来。
+            分隔线请一律用「等号」。
+         ======================================================================== -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

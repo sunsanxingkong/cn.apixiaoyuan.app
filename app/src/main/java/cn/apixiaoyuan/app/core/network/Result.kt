@@ -74,6 +74,47 @@ data class Envelope<T>(
     val data: T? = null,
 )
 
+/**
+ * ★ 主域（`/leo-*`）实测信封（2026-10-03）。
+ *
+ * ## 为什么另起一个而不是改 [Envelope]
+ *
+ * 真机实测的主域响应长这样（`ExerciseModels.kt` KDoc 里有原始记录）：
+ * ```json
+ * {"ver":"1.0","status":200,"message":"","data":{"curRank":0,"curWeekScore":0,...}}
+ * ```
+ * 字段是 **`status` / `message`**，而 [Envelope] 写的是 `code` / `msg` —— **对不上**。
+ *
+ * [Envelope] 是照「常见形态」猜的，且**全项目无人使用**（只在注释里出现过）。
+ * 与其去改一个可能被别处引用的既有类，不如按实测另起一个名字明确的。
+ *
+ * ## 为什么必须有它（★「分数显示 0」的真根因）
+ *
+ * 老挂此前把 `/leo-star/android/exercise/rank/pre-fetch` 等端点的返回类型
+ * 直接写成**裸** `LeoUserCurrentExpData`，而 `RetrofitFactory` 只注册了
+ * 一个 kotlinx converter、**没有任何拆信封逻辑**（`@GsonConverter` 注解在
+ * `Annotations.kt` 里自己写明「只做标记」）。
+ * 于是 `data` 被 `ignoreUnknownKeys` 忽略，`curWeekScore` 取 Kotlin 默认值 **0**
+ * —— 这就是「账号分数始终显示 0」的原因（改字段名没用，两个字段都在信封里）。
+ *
+ * pk-node 侧是**手写** `pf.json.data.curWeekScore` 显式拆信封，所以它一直是对的。
+ */
+@Serializable
+data class LeoEnvelope<T>(
+    /** 协议版本，形如 `"1.0"`。 */
+    val ver: String = "",
+    /** 业务状态码。实测 200 = 成功。 */
+    val status: Int = 0,
+    /** 错误信息（成功时空串）。 */
+    val message: String = "",
+    /** 业务数据体。 */
+    val data: T? = null,
+)
+
+/** 主域信封是否业务成功（实测 `status == 200`）。 */
+val LeoEnvelope<*>.isBizOk: Boolean
+    get() = status == 200 && data != null
+
 /** 把信封拆成 ApiResult；data 为 null 时视为业务失败。 */
 fun <T> Envelope<T>.toResult(): ApiResult<T> = when {
     code == CODE_UNAUTHORIZED -> ApiResult.Failure(ApiException.Unauthorized())

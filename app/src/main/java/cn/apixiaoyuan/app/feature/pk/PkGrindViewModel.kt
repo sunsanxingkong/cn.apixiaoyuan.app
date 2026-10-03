@@ -1,6 +1,7 @@
 package cn.apixiaoyuan.app.feature.pk
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import android.util.Log
@@ -47,12 +48,26 @@ class PkGrindViewModel : ViewModel() {
 
     var running by mutableStateOf(false)
         private set
-
     var progress by mutableStateOf("")
         private set
-
     var message by mutableStateOf<String?>(null)
         private set
+
+    /**
+     * 运行日志（★ 2026-10-03 新增，对齐刷练习页的日志区）。
+     *
+     * 用户要求：「pk 刷局加个日志显示就和刷练习一样」。
+     *
+     * 为什么需要：此前只有一个 `progress` 单行文本 + 最后一条 `message`，
+     * 一轮里「出题重试了几次 / 提交被拒的 HTTP 码 / 结算是多少」全被覆盖掉了。
+     * 出问题时用户只能看到「完成 0/10 局」，没有任何排查线索
+     * （这正是 2026-10-02 排查「一秒钟就结束」时的痛点）。
+     *
+     * 事件来源 = [PkBattleEngine.runBattle] 的 `onProgress` 回调 —— 引擎里
+     * `onEvent(...)` 已经写得足够细（出题/重试/提交/结算/频控退避），
+     * 之前只是没地方展示。
+     */
+    val logs = mutableStateListOf<String>()
 
     private var job: Job? = null
 
@@ -149,7 +164,10 @@ class PkGrindViewModel : ViewModel() {
         running = true
         message = null
         progress = "开始：刷 $rounds 局（知识点 $pointId）"
-
+        // ★ 2026-10-03：每次开跑清空日志，并记下起始参数（对齐刷练习页）。
+        logs.clear()
+        appendLog("开始：轮数=$rounds 知识点=$pointId 提交延迟=[$submitDelayMinMs,$submitDelayMaxMs]ms " +
+            "轮间隔=${roundIntervalMs}ms 笔迹=$strokeMode")
         job = viewModelScope.launch {
             try {
                 // 记下最后一条事件：失败时把它带进结果文案。
@@ -171,6 +189,7 @@ class PkGrindViewModel : ViewModel() {
                     onProgress = { _, done, total, ev ->
                         lastEvent = ev
                         progress = "[数学] $ev（$done/$total）"
+                        appendLog("[数学] $ev（$done/$total）")
                     },
                 )
                 running = false
@@ -181,16 +200,19 @@ class PkGrindViewModel : ViewModel() {
                 } else {
                     "结束：完成 $done/$rounds 局｜最后一条：$lastEvent"
                 }
+                appendLog("===== $message =====")
                 refreshScoreOnly()
             } catch (c: CancellationException) {
                 running = false
                 progress = ""
                 message = "已停止。"
+                appendLog("===== 已手动停止 =====")
                 throw c
             } catch (t: Throwable) {
                 running = false
                 progress = ""
                 message = "异常：${t.message ?: t}"
+                appendLog("异常：${t.message ?: t}")
             }
         }
     }
@@ -211,7 +233,27 @@ class PkGrindViewModel : ViewModel() {
         job?.cancel()
     }
 
-    companion object {
+    /**
+     * 追加一行运行日志 + **批量**裁剪（★ 与刷练习页 `ExercisePumpViewModel.append` 同款）。
+     *
+     * 为什么批量而不是「每行删一行」：真机上曾出现「一旦开始删头，滚动就不丝滑」——
+     * 每来一行删一行会让滚动条 `maxValue` 每帧变小，跟随滚动的目标跟着抖。
+     * 这里到上限才一次性删 [TRIM_BATCH] 行，触发频率降到 1/100。
+     */
+    private fun appendLog(line: String) {
+        logs.add(line)
+        if (logs.size > MAX_LINES) {
+            repeat(TRIM_BATCH) { if (logs.isNotEmpty()) logs.removeAt(0) }
+        }
+    }
+
+    private companion object {
+        /** 日志保留上限。 */
+        const val MAX_LINES = 500
+
+        /** 一次裁剪多少行（批量，避免滚动抖动）。 */
+        const val TRIM_BATCH = 100
+
         /** 日志 TAG（设备链补链失败等诊断用）。 */
         private const val TAG = "PkGrindVM"
 

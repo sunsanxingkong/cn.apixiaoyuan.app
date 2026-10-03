@@ -42,7 +42,8 @@ object ExerciseRepository {
      * 「拉到了但内容空」，这是可接受的中间态。
      */
     suspend fun fetchTasks(): LeoCurrentTaskInfo? = runCatching {
-        ServiceLocator.exerciseLegacy.getCurrentUserTasks()
+        // ★★ 2026-10-03：必须取 `.data`（主域响应带信封），理由见 [fetchExp]。
+        ServiceLocator.exerciseLegacy.getCurrentUserTasks().data
     }.getOrNull()
 
     /**
@@ -73,20 +74,30 @@ object ExerciseRepository {
      * 被 [runCatching] 兜住。
      */
     suspend fun fetchExp(): LeoUserCurrentExpData? = runCatching {
-        ServiceLocator.exerciseLegacy.getCurrentUserExp()
+        // ★★ 2026-10-03：**必须取 `.data`** —— 主域响应带信封
+        //    `{ver,status,message,data}`，而 Retrofit 不做拆信封
+        //    （`@GsonConverter` 只做标记）。此前直接返回裸对象，
+        //    导致 `curWeekScore` 恒为默认值 0（「分数显示 0」的真根因）。
+        //    pk-node 侧同样是手写 `pf.json.data.curWeekScore` 显式拆的。
+        ServiceLocator.exerciseLegacy.getCurrentUserExp().data
     }.getOrNull()
 
     /**
      * 拉练习星级首页（`/leo-star/android/exercise/homepage`）。
      *
-     * **这是刷分真正该看的分数**：`postSavedExp`（= `rank/login/attend`）记的是
-     * **练习经验**，落在 `ExerciseHomepageData.curWeekExp` / `todayObtainedPoints`；
-     * 而 [fetchExp] 的 `curWeekScore` 是**周排行榜**分数，刷分不会让它变化。
+     * ⚠️ 2026-10-03 口径更正（此前这段注释写反了）：
+     * 本接口的 `curWeekExp`（本周**练习经验**）**实测恒为 0**，
+     * 它**不是**「刷分真正该看的分数」。真分数是 [fetchExp] 的
+     * `curWeekScore`（周排行榜分数，实测 846410）。pk-node 一直用后者。
+     *
+     * 本接口仍有用的字段：`todayObtainedPoints`（今日积分）/ `continuousDays`
+     * （连续打卡）/ `curRank`（排名）/ `nextMultiplier`（下档倍率）。
      *
      * 该端点**不在** solar-encoder 的 417 名单里（真机实测恒 200），所以可用。
      */
     suspend fun fetchExerciseHomepage(): ExerciseHomepageData? = runCatching {
-        ServiceLocator.exerciseStar.getHomepage()
+        // 同样必须取 `.data`（信封），理由见 [fetchExp]。
+        ServiceLocator.exerciseStar.getHomepage().data
     }.getOrNull()
 
     /**

@@ -7,6 +7,7 @@ import cn.apixiaoyuan.app.core.network.BASE_LEO
 import cn.apixiaoyuan.app.core.network.BaseUrl
 import cn.apixiaoyuan.app.core.network.CheckNothing
 import cn.apixiaoyuan.app.core.network.GsonConverter
+import cn.apixiaoyuan.app.core.network.LeoEnvelope
 import cn.apixiaoyuan.app.core.network.NeedEncode
 import cn.apixiaoyuan.app.core.network.NotNullAndValid
 import okhttp3.ResponseBody
@@ -57,24 +58,31 @@ interface LeoExerciseCommonLegacyApiService {
     /**
      * 拉当前用户经验值（星级任务前置数据）。
      *
-     * GET `/leo-star/android/exercise/rank/pre-fetch`，返回 `LeoUserCurrentExpData`。
+     * GET `/leo-star/android/exercise/rank/pre-fetch`。
+     *
+     * ★★ 2026-10-03：返回类型改为 [LeoEnvelope]。此前声明**裸**
+     * `LeoUserCurrentExpData`，而主域响应带信封 `{ver,status,message,data}`、
+     * `RetrofitFactory` 又不拆信封（`@GsonConverter` 只做标记）→
+     * `data` 被忽略、`curWeekScore` 取默认 0 →「分数始终显示 0」。
+     * pk-node 是手写 `pf.json.data.curWeekScore` 显式拆的，所以它一直对。
      */
     @BaseUrl(BASE_LEO)
     @GsonConverter
     @NotNullAndValid
     @GET("/leo-star/android/exercise/rank/pre-fetch")
-    suspend fun getCurrentUserExp(): LeoUserCurrentExpData
+    suspend fun getCurrentUserExp(): LeoEnvelope<LeoUserCurrentExpData>
 
     /**
      * 拉当前用户任务（首页任务卡）。
      *
-     * GET `/leo-star/android/exercise/task/home`，返回 `LeoCurrentTaskInfo`。
+     * GET `/leo-star/android/exercise/task/home`，返回 [LeoEnvelope]<[LeoCurrentTaskInfo]>。
+     * 同样必须带信封（理由见 [getCurrentUserExp]）。
      */
     @BaseUrl(BASE_LEO)
     @CheckNothing
     @GsonConverter
     @GET("/leo-star/android/exercise/task/home")
-    suspend fun getCurrentUserTasks(): LeoCurrentTaskInfo
+    suspend fun getCurrentUserTasks(): LeoEnvelope<LeoCurrentTaskInfo>
 
     /**
      * 语文练习首页同步（旧版 `Call`，返回 `Integer`）。

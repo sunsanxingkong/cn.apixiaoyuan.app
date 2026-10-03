@@ -5,8 +5,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -14,12 +17,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cn.apixiaoyuan.app.core.account.SubAccountItem
 import cn.apixiaoyuan.app.core.design.component.AppScrollScaffold
+import cn.apixiaoyuan.app.core.design.component.AutoFollowScroll
 import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.pk.PkStrokeMode
 import top.yukonga.miuix.kmp.basic.Button
@@ -253,6 +259,41 @@ fun PkGrindScreen(
                 }
                 viewModel.message?.let {
                     Text(text = it, color = MiuixTheme.colorScheme.onSurfaceContainer)
+                }
+            }
+            // ★ 2026-10-03：运行日志（用户要求「pk 刷局加个日志显示就和刷练习一样」）。
+            //
+            // 与 `ExercisePumpScreen` 的日志区**同款**：
+            //   - 同一个 [cn.apixiaoyuan.app.core.design.component.AutoFollowScroll]
+            //     （到底跟随 / 上滑即停 / 回底恢复 / 全程动画）；
+            //   - 等宽小字号、min 160dp / max 360dp、内容在 ViewModel 里**批量**裁剪。
+            SectionCard(title = "运行日志") {
+                val logScroll = rememberScrollState()
+                AutoFollowScroll(state = logScroll, itemCount = viewModel.logs.size)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 160.dp, max = 360.dp)
+                        .verticalScroll(logScroll)
+                        .padding(horizontal = 4.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (viewModel.logs.isEmpty()) {
+                        Text(
+                            text = "（暂无 —— 点「开始 API 刷局」后这里会逐条显示出题/提交/结算过程）",
+                            color = MiuixTheme.colorScheme.onSurfaceContainerVariant,
+                            fontSize = 11.sp,
+                        )
+                    } else {
+                        viewModel.logs.forEach { line ->
+                            Text(
+                                text = line,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                color = MiuixTheme.colorScheme.onSurfaceContainer,
+                            )
+                        }
+                    }
                 }
             }
 

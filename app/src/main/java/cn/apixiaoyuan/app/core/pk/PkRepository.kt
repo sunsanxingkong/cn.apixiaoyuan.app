@@ -2,6 +2,7 @@ package cn.apixiaoyuan.app.core.pk
 
 import cn.apixiaoyuan.app.core.network.NetworkConfig
 import cn.apixiaoyuan.app.core.network.ServiceLocator
+import cn.apixiaoyuan.app.core.network.isBizOk
 import kotlinx.serialization.json.JsonElement
 
 /**
@@ -104,6 +105,9 @@ object PkRepository {
      * @return true = 两层齐全（主域业务可打）；false = 缺设备链或未登录
      */
     suspend fun probeAuth(): Boolean = runCatching {
-        ServiceLocator.exerciseLegacy.getCurrentUserExp() != null
+        // ★ 2026-10-03：端点改为返回信封（[cn.apixiaoyuan.app.core.network.LeoEnvelope]），
+        //   所以这里要判**业务是否成功**（status==200 且 data 非空），
+        //   而不是「对象非 null」—— 信封对象本身永远非 null，那样会恒返回 true。
+        ServiceLocator.exerciseLegacy.getCurrentUserExp().isBizOk
     }.getOrDefault(false)
 }

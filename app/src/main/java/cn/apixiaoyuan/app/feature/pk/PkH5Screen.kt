@@ -150,6 +150,9 @@ fun PkH5Screen(
             // 只会在 `CommonWebView` 或 `LeoWebView.callNative` 上落地，
             // 少注册 = H5 永远拿不到登录态（真机症状：首屏「一年级 / 0 胜 / 胜率 0%」）。
             val bridge = PkWebViewBridge(context.applicationContext, this)
+            // ★ 2026-10-03：把「PK 主页面 URL」喂给桥 —— closeWebView 在历史退不回去时
+            //   靠它兜底回填，避免「弹窗关不掉 / 卡在下级页」。
+            bridge.homeUrl = viewModel.h5Url
             addJavascriptInterface(bridge, "WebView")
             addJavascriptInterface(bridge, "CommonWebView")
             addJavascriptInterface(bridge, "LeoWebView")

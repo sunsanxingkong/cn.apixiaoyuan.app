@@ -102,6 +102,33 @@ class PkWebViewBridge(
 ) {
     private val main = Handler(Looper.getMainLooper())
 
+    /**
+     * `openWebView` 打开过的层级（★ 2026-10-03 新增）。
+     *
+     * 原版是**每个下级页面开一个新 WebView**；本工程是单 WebView，
+     * 只能用「记录层数」来近似栈语义 —— 见 [openWebView] / [closeWebView] 的 KDoc。
+     * 存的是各层 URL，仅用于计数与日志，不参与导航本身。
+     */
+    private val openedLayers = java.util.ArrayDeque<String>()
+
+    /**
+     * PK 主页面 URL（由 [cn.apixiaoyuan.app.feature.pk.PkH5Screen] 在加载首页时喂入）。
+     *
+     * 作用：[closeWebView] 在「历史退不回去」时用它兜底回填，
+     * 保证不会出现「弹窗关不掉、卡在下级页」。
+     */
+    var homeUrl: String? = null
+
+    /** 当前已压入的下级层数（供 Screen 在返回键里判断该层退还是该退容器）。 */
+    val openedLayerCount: Int get() = openedLayers.size
+
+    /** 返回键用：有下级层就退一层（返回 true = 已消费）。 */
+    fun popLayerIfAny(): Boolean {
+        if (openedLayers.isEmpty()) return false
+        closeWebView(null)
+        return true
+    }
+
     // ==================== 无前缀能力 ====================
 
     /**
@@ -176,16 +203,76 @@ class PkWebViewBridge(
     fun openWebView(payload: String?) {
         val url = extractOpenUrl(payload)
         if (!url.isNullOrBlank()) {
-            main.post { runCatching { webView.loadUrl(url) } }
+            // ★★ 2026-10-03 修复：原版是**新开一个 WebView 压栈**，不是替换当前页。
+            //
+            // 此前是 `webView.loadUrl(url)` —— 直接把当前页替换掉。后果有两个：
+            //   1. 下级页面（匹配中 / 对战 / 结算页）**顶掉**了主页面，
+            //      H5 后续要「返回上级」时历史已经乱了；
+            //   2. `closeWebView` 桥是 `goBack()` —— 新页是**替换**而非入栈，
+            //      goBack 会退到主页面**之前**的页面（或直接退不出 PK）。
+            //
+            // 单 WebView 下没有「前插历史项」的 API，所以改为
+            // 「显式记录层数」+ 由 [closeWebView] 弹层，并在历史退不回去时用
+            // [homeUrl] 回填兜底。
+            //
+            // 用 `post` 保证在主线程执行（JavascriptInterface 回调不在主线程）。
+            main.post {
+                runCatching {
+                    // 让 openWebView 打开的新页面成为**历史栈里新的一项**：
+                    // 先 loadUrl 再在历史里前插一个占位是不行的（WebView 无此 API），
+                    // 因此改为「记录层数」+ 由 closeWebView 走 goBack，
+                    // 并在 goBack 不可用时用**主页面 URL 回填**兜底。
+                    openedLayers.add(url)
+                    webView.loadUrl(url)
+                }
+            }
         }
         respond(payload, ok())
     }
 
-    /** 关容器。单容器下退 H5 历史即可。 */
+    /**
+     * 关容器（原版语义：**关闭 openWebView 打开的那一层**，而不是退出整个 PK）。
+     *
+     * ## 2026-10-03 修正
+     *
+     * 此前一律 `if (webView.canGoBack()) goBack()`。问题：
+     *  - `openWebView` 是 `loadUrl`（替换式），此时 goBack 会退到**主页面之前**的页面
+     *    —— 用户看到「答完题直接跳回 App 主页」，而不是回到结算页；
+     *  - 若历史里没有上一项，`canGoBack()` 为 false，则**什么都不做**，弹窗关不掉。
+     *
+     * 现在的策略（按可靠度递减）：
+     *  1. 有我们记录过的 [openedLayers] → 弹一层，并 goBack；
+     *  2. 否则若能 goBack → goBack（H5 内部路由产生的历史）；
+     *  3. 否则**回填主页面**（[homeUrl] 由 Screen 在加载首页时喂进来），
+     *     保证「关不掉」这种情况不存在。
+     */
     @JavascriptInterface
     fun closeWebView(payload: String?) {
-        main.post { runCatching { if (webView.canGoBack()) webView.goBack() } }
+        main.post {
+            runCatching {
+                if (openedLayers.isNotEmpty()) {
+                    openedLayers.removeLast()
+                    if (webView.canGoBack()) {
+                        webView.goBack()
+                    } else {
+                        backToHome()
+                    }
+                } else if (webView.canGoBack()) {
+                    webView.goBack()
+                } else {
+                    backToHome()
+                }
+            }
+        }
         respond(payload, ok())
+    }
+
+    /** 兜底：把容器退回 PK 主页面（避免「弹窗关不掉 / 卡在下级页」）。 */
+    private fun backToHome() {
+        val home = homeUrl
+        if (!home.isNullOrBlank()) {
+            runCatching { webView.loadUrl(home) }
+        }
     }
 
     /** 提示。消息形态两种都兜：纯字符串 / {message: "..."}。 */

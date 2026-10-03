@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Card
@@ -491,14 +493,30 @@ fun PkH5Screen(
             // ①（**新页滑入**）动的是上面 `AndroidView` 的 `graphicsLayer` ——
             //   因为它要动的是 WebView 这个 View 自己（空 Box 是没用的）。
             //
-            // ②（**被覆盖层**）就是这里：返回/退页时，应该看到「旧页滑回来盖住当前页」。
-            //   但**拿不到旧 H5 的画面快照**（WebView 在 onPageStarted 时已清空旧内容），
-            //   所以用 H5 自己的底色 [bg] 代替。
-            //   miuix 带 0.25 宽视差并降到 0.9 不透明；aosp 是「轻推」，不视差。
+            // ②（**被覆盖层**）就是这里：返回/退页时应该看到「旧页滑回来盖住当前页」。
+            //
+            // ⚠️⚠️ 2026-10-03 **真机实测后改**（这条很重要）：
+            //
+            // 我原来这一层是 **`matchParentSize()` 铺满整屏**的，结果真机抓帧发现
+            // **整屏白闪一下** —— 因为这个 H5 的页面底色就是 `#ffffffff`（纯白，
+            // 见日志 `页面底色: #ffffffff`），而 WebView 在退页瞬间也是白的，
+            // 两者叠加 = 一整屏白，看起来又僵又刺眼。
+            //
+            // 改成**只铺顶部那条状态栏带子**（高度 = statusBars inset）：
+            //  · WebView 区域**完全不动**，不会有白闪；
+            //  · 顶栏那条带子正好是「App 的背景露出来的地方」，让它跟随转场滑一下，
+            //    观感就接上了（也顺带落实了用户那句「顶部用纯色填充」）。
+            //
+            // 局限依旧：拿不到旧 H5 的画面快照，所以只能用底色代替。
             if (navAnim.visible && !navAnim.entering) {
+                val statusBarPx = with(LocalDensity.current) {
+                    WindowInsets.statusBars.getTop(this).toFloat()
+                }
                 Box(
                     modifier = Modifier
-                        .matchParentSize()
+                        .fillMaxWidth()
+                        .height(with(LocalDensity.current) { statusBarPx.toDp() })
+                        .align(Alignment.TopCenter)
                         .graphicsLayer {
                             translationX = (1f - t) * -coverPx
                             alpha = ((1f - t) * (1f - spec.coverAlpha) + spec.coverAlpha)

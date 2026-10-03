@@ -584,9 +584,30 @@ private fun syncCookiesToWebView(pageUrl: String) {
     val pageHost = runCatching { java.net.URI(pageUrl).host }.getOrNull()
         ?: "xyks.yuanfudao.com"
 
+    // ★★ 2026-10-03 修串号：先**清掉本 host 下的旧 cookie**，再写当前账号的。
+    //
+    // 为什么必须清：CookieManager 是**持久**的（还会 flush 到磁盘）。
+    // 上一号切走后，它的 `sid`/`sess`/`userid`/`ks_*` 仍留在里面；
+    // 只 setCookie 覆盖同名项的话，那些**名字不同**的残留会继续被发出去
+    // （例如旧号的 `ks_persistent`）→ 服务端按残留值判身份 → 串号。
+    //
+    // 只清与自有域相关的 cookie，不动 WebView 里其它站点（PK 页会加载 CDN 资源）。
+    runCatching {
+        val existing = cm.getCookie("https://$pageHost") ?: ""
+        existing.split(";").forEach { kv ->
+            val name = kv.trim().substringBefore('=')
+            if (name.isNotBlank()) {
+                cm.setCookie("https://$pageHost", "$name=; path=/; domain=.${
+                        rawHost(pageHost)
+                    }; Max-Age=0")
+            }
+        }
+    }
+
+    // 取「PK 页固化的身份」对应的 cookie（不是全局当前身份）。
+    val pkAccount = SessionStore.pkAccountId
     SessionStore.loadCookies().forEach { entry ->
         if (entry.value.isEmpty()) return@forEach
-
         // ★ 关键修复（2026-09-26）：cookie domain 必须带前导点，
         // 否则 CookieManager 会把它当 host-only cookie，只匹配裸域
         // `yuanfudao.com`，**不匹配** `xyks.yuanfudao.com` → PK H5 表现为未登录。
@@ -598,9 +619,14 @@ private fun syncCookiesToWebView(pageUrl: String) {
         val rawDomain = entry.domain.removePrefix(".")
         // 统一补前导点：domain cookie 才能匹配所有子域。
         val domain = ".$rawDomain"
-
+        // ★ 修串号：`userid` 换成 PK 页固化的身份，与 `PkH5Proxy` 的出站 cookie 一致。
+        val value = if (entry.name == "userid" && pkAccount != null && pkAccount > 0) {
+            pkAccount.toString()
+        } else {
+            entry.value
+        }
         val cookieString = buildString {
-            append(entry.name).append('=').append(entry.value)
+            append(entry.name).append('=').append(value)
             append("; domain=").append(domain)
             append("; path=").append(entry.path.ifEmpty { "/" })
             if (entry.expiresAt > 0L) {
@@ -625,6 +651,18 @@ private fun syncCookiesToWebView(pageUrl: String) {
             "userid=${SessionStore.cookie("userid") ?: "无"} " +
             "ks_deviceid=${SessionStore.cookie("ks_deviceid") ?: "无"}",
     )
+}
+
+/**
+ * 从 host 取出「可加前导点的父域」。
+ *
+ * `xyks.yuanfudao.com` → `yuanfudao.com`（用于拼 `.yuanfudao.com` 这种 domain）。
+ * 只保留最后两段 —— 本项目涉及的域都是 `子域.主域.顶级域` 的三段式；
+ * 多段子域（a.b.c.com）会取 `c.com`，对本项目足够且更安全（不下发到太宽的域）。
+ */
+private fun rawHost(host: String): String {
+    val parts = host.split('.')
+    return if (parts.size >= 2) parts.takeLast(2).joinToString(".") else host
 }
 
 /** epoch 毫秒 → HTTP 日期（`EEE, dd MMM yyyy HH:mm:ss z`，GMT）。 */

@@ -3,6 +3,7 @@ package cn.apixiaoyuan.app.core.pk
 import cn.apixiaoyuan.app.core.network.NetworkConfig
 import cn.apixiaoyuan.app.core.network.ServiceLocator
 import cn.apixiaoyuan.app.core.network.isBizOk
+import cn.apixiaoyuan.app.core.session.SessionStore
 import kotlinx.serialization.json.JsonElement
 
 /**
@@ -60,13 +61,29 @@ object PkRepository {
      * 原版这个 H5 就挂在主域下，不是独立域。
      *
      * 参数插在 `#` 之前（见 [PK_H5_QUERY]）。
+     *
+     * ## ★ 2026-10-03：带上 `leoAccountId`（修串号）
+     *
+     * 此前 URL **不带任何账号标识**，于是 H5 只能靠「全局那份 cookie」认人 ——
+     * 用户在别处切号后，页面与请求就可能分属两个身份（串号）。
+     *
+     * 对齐 pk-node 的约定：URL 带 `leoAccountId=<id>`，H5 侧注入
+     * `window.__PK_LEO_ID`，代理按它取**该账号**的 cookie。
+     * 这样 PK 页的身份在「打开那一刻」就固化下来，不受后续切号影响。
+     *
+     * @param leoAccountId 小猿 userid；null = 用当前会话身份（保持旧行为）
      */
-    fun pkH5Url(): String {
+    fun pkH5Url(leoAccountId: Long? = SessionStore.pkAccountId ?: SessionStore.yfdU): String {
         val base = NetworkConfig.leoBaseUrl()
         val hashAt = PK_H5_PATH.indexOf('#')
         val path = if (hashAt >= 0) PK_H5_PATH.substring(0, hashAt) else PK_H5_PATH
         val hash = if (hashAt >= 0) PK_H5_PATH.substring(hashAt) else ""
-        return base + path + PK_H5_QUERY + hash
+        val acct = if (leoAccountId != null && leoAccountId > 0) {
+            "&leoAccountId=$leoAccountId"
+        } else {
+            ""
+        }
+        return base + path + PK_H5_QUERY + acct + hash
     }
 
     /**

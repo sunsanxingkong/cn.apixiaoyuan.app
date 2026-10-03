@@ -42,6 +42,8 @@ object SessionStore {
     private const val KEY_GRADE = "grade"
     private const val KEY_NICKNAME = "current_nickname"
     private const val KEY_AVATAR = "current_avatar_url"
+    /** PK 页面选用的身份（小猿 userid）；见 [pkAccountId] 的 KDoc（修串号）。 */
+    private const val KEY_PK_ACCOUNT = "pk_account_id"
 
     /**
      * 设备链 cookie 的名字前缀（`ks_r` / `ks_u` / `ks_persistent` / `ks_deviceid` …）。
@@ -528,6 +530,59 @@ object SessionStore {
     fun snapshot(): AuthInterceptor.AuthSnapshot? {
         val cookie = cookieHeader() ?: return null
         return AuthInterceptor.AuthSnapshot(yfdU = yfdU, cookie = cookie)
+    }
+
+    // ---------------------------------------------------------------
+    // PK 页面「用哪个身份」（★ 2026-10-03 修串号）
+    // ---------------------------------------------------------------
+
+    /**
+     * PK 页面当前选用的身份（小猿 userid）。
+     *
+     * 老挂的登录态是**一份 cookie + 切号只改 `userid`**（见 `AccountRepository.switchTo`），
+     * 而 PK H5 链路有三处会各自去读「当前身份」：
+     *   1. H5 入口 URL（`PkRepository.pkH5Url()`）
+     *   2. 出站代理（`PkH5Proxy.fetch` 里的 `SessionStore.cookieHeader()`）
+     *   3. WebView 的 CookieManager（`syncCookiesToWebView`）
+     *
+     * 一旦用户在别处切了号（`SessionStore.userid` 变了），而 PK 页
+     * **没有重新同步 cookie**，就会出现「页面里显示 A、请求却用 B」= **串号**。
+     *
+     * 做法：PK 页打开时把身份**固化**在这里；此后
+     *   - URL 带上它（对齐 pk-node 的 `leoAccountId` 约定）；
+     *   - 代理与 WebView 同步都以它为准。
+     * 这样即便别处切号，PK 页也不会被"偷偷换人"。
+     */
+    var pkAccountId: Long?
+        get() = prefs().getString(KEY_PK_ACCOUNT, null)?.toLongOrNull()
+        set(v) {
+            val e = prefs().edit()
+            if (v == null) e.remove(KEY_PK_ACCOUNT) else e.putString(KEY_PK_ACCOUNT, v.toString())
+            e.apply()
+        }
+
+    /**
+     * 生成「面向某个 PK 身份」的 cookie 头。
+     *
+     * 与 [cookieHeader] 的唯一区别：把 `userid` 换成 [accountId]。
+     *
+     * ## 为什么要换而不是直接用当前 cookie
+     *
+     * `userid` 是「身份」的开关：服务端按它认人（见 `AccountRepository.switchTo`
+     * 的注释 —— 切换响应未必带 Set-Cookie，所以要显式写一次 `userid`）。
+     * 若 PK 页要用 A，而当前全局身份是 B，就必须把这个值改回 A，
+     * 否则请求会以 B 的身份发出 → 串号。
+     *
+     * @param accountId 目标小猿 userid；null 表示「就用当前身份」
+     */
+    fun cookieHeaderFor(accountId: Long?): String? {
+        val list = loadCookies()
+        if (list.isEmpty()) return null
+        if (accountId == null) return list.joinToString("; ") { "${it.name}=${it.value}" }
+        val want = accountId.toString()
+        return list.joinToString("; ") { c ->
+            if (c.name == "userid") "userid=$want" else "${c.name}=${c.value}"
+        }
     }
 }
 

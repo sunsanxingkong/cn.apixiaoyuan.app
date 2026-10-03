@@ -81,6 +81,11 @@ class PkViewModel : ViewModel() {
     fun loadEntry() {
         if (loading) return
         loading = true
+        // ★ 2026-10-03 修串号：进入 PK 页时把「用哪个身份」**固化**下来。
+        //   此后即便用户去别处切号，PK 页仍用这一个身份（H5 / 代理 / WebView 三者一致）。
+        //   取不到 yfdU 时保持原值（下次进入再试）。
+        SessionStore.yfdU?.let { SessionStore.pkAccountId = it }
+        h5Url = PkRepository.pkH5Url()
         viewModelScope.launch {
             authOk = PkRepository.probeAuth()
             val grade = SessionStore.grade() ?: DEFAULT_GRADE

@@ -174,8 +174,14 @@ internal object PkH5Proxy {
      */
     fun fetch(method: String, url: String, headers: Map<String, String>, body: ByteArray?): WebResponse? {
         val signed = withSignAndCommonQuery(url)
-        val cookie = headers.entries
-            .firstOrNull { it.key.equals("Cookie", true) }?.value
+        // ★ 2026-10-03 修串号：cookie 取「PK 页固化的那个身份」，而不是全局当前身份。
+        //
+        //   WebView 自己带的 Cookie 头（headers 里）在「页面刚加载、别处已切号」时
+        //   可能仍是旧的；但它和我们想用的账号通常一致（因为 syncCookiesToWebView
+        //   也按同一账号同步）。这里优先用**我们自己按账号生成的**那份，
+        //   保证「代理出站身份」与「H5 认为的身份」永远一致。
+        val cookie = SessionStore.cookieHeaderFor(SessionStore.pkAccountId)
+            ?: headers.entries.firstOrNull { it.key.equals("Cookie", true) }?.value
             ?: SessionStore.cookieHeader()
 
         // ★ 2026-09-30：「PK 还是不行」的取证入口 —— 证明代理**确实被调用**了。

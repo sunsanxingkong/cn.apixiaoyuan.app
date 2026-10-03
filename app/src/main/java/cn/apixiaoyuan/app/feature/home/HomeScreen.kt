@@ -47,6 +47,7 @@ import cn.apixiaoyuan.app.core.navigation.RouteExercise
 import cn.apixiaoyuan.app.core.navigation.RouteGrind
 import cn.apixiaoyuan.app.core.navigation.RouteLogin
 import cn.apixiaoyuan.app.core.navigation.RoutePk
+import cn.apixiaoyuan.app.core.navigation.RoutePkNode
 import cn.apixiaoyuan.app.core.navigation.RouteSamples
 import cn.apixiaoyuan.app.core.navigation.RouteTerminal
 import cn.apixiaoyuan.app.core.session.SessionStore
@@ -119,6 +120,8 @@ fun HomeScreen(navController: AppNavController) {
                 // ★ 2026-10-03 新增：Linux 终端（用户要求「主页加入 liunx 终端入口」）。
                 //   跑的是 Android 自带的 /system/bin/sh（toybox），不是塞进去的发行版。
                 QuickEntry("终端", "Linux", "内置 Linux shell：手动跑 node / 查进程 / 看服务", RouteTerminal),
+                // ★ 2026-10-03 新增：pk-node 管理后台（内置 node 的网页控制台，自动登录）。
+                QuickEntry("pk-node", "管理后台", "账号 / 设备链池 / 任务 / 日志 / 刷局（自动登录）", RoutePkNode),
                 QuickEntry("样本库", "Samples", "请求历史与回放", RouteSamples),
             )
 

@@ -44,6 +44,15 @@ sealed interface Route : NavKey
 data object RouteHome : Route
 
 /**
+ * 「pk-node 管理后台」二级页（★ 2026-10-03 新增，用户要求「把 pk-node 网页也在主页做一个入口」）。
+ *
+ * 就是内置 node 提供的那个网页控制台：账号管理 / 设备链池 / 任务 / 日志 /
+ * 刷 PK / 刷练习 …… 与 `http://127.0.0.1:8792` 浏览器打开的是**同一个页面**。
+ */
+@Serializable
+data object RoutePkNode : Route
+
+/**
  * 「Linux 终端」二级页（★ 2026-10-03 新增）。
  *
  * 用户要求：「主页加入 liunx 终端入口」。

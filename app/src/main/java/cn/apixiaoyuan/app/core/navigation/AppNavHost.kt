@@ -82,6 +82,10 @@ fun AppNavHost(
             entry<RouteTerminal>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                 cn.apixiaoyuan.app.feature.terminal.TerminalScreen(navController)
             }
+            // ★ 2026-10-03 新增：pk-node 管理后台（内置 node 提供的网页控制台）。
+            entry<RoutePkNode>(swipeDismiss = NavSwipeDirection.LeftToRight) {
+                cn.apixiaoyuan.app.feature.pknode.PkNodeScreen(navController)
+            }
             entry<RouteExercise>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                 cn.apixiaoyuan.app.feature.exercise.ExerciseScreen(navController)
             }

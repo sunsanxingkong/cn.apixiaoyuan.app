@@ -77,6 +77,16 @@ object PkHostOrchestrator {
     var state: State by mutableStateOf<State>(State.Idle)
         private set
 
+    /**
+     * handshake 拿到的管理员凭据（username to password）。
+     *
+     * 用途：`PkNodeScreen`（管理后台网页）要**自动登录**，得知道账号密码。
+     * 不是敏感信息 —— 就是 pk-node 首次启动写入的 `admin/admin`，
+     * 且服务只监听 `127.0.0.1`。
+     */
+    var adminCredentials: Pair<String, String>? by mutableStateOf(null)
+        private set
+
     private val job = SupervisorJob()
     private val scope = CoroutineScope(job + Dispatchers.IO)
 
@@ -142,8 +152,13 @@ object PkHostOrchestrator {
         }
 
         // ---- ④ 联动 ----
-        val hs = PkNodeLink.handshake()
-        if (hs == null) {
+        //
+        // ⚠️ `hs` 后面会被重新赋值（推送登录态之后要重新 handshake），
+        //    所以**先做一次非空绑定** `val hs0`，再用可变的 `var hs = hs0`。
+        //    否则「`if (hs == null) return` + 重新赋值」会让 Kotlin 的
+        //    智能转换失效，后面全是 `Only safe (?.) ... on a nullable receiver`。
+        val hs0 = PkNodeLink.handshake()
+        if (hs0 == null) {
             // 服务活着但联动调不通：H5 仍可打开（内容靠 pk-node 自己的登录态），
             // 只是 App 侧不知道有哪些账号 —— 降级而不是失败。
             AppLogger.w(TAG, "服务已就绪，但 handshake 失败，降级为「未联动」")
@@ -153,6 +168,25 @@ object PkHostOrchestrator {
                 leoAccountId = null,
                 linked = false,
             ).also { state = it }
+        }
+        var hs: PkNodeLink.Handshake = hs0
+
+        // ---- ④.5 ★ 把 App 的登录态推给 pk-node（2026-10-03）----
+        //
+        // 真机症状：PK H5 出来了但**没有登录态**。
+        // 根因：内置 node 的 SQLite 是全新的，**一个小猿账号都没有**
+        // （日志：`联动完成：账号 0 个，主账号 yfdU=null linked=false`），
+        // 而 H5 的业务请求是 pk-node 用「它库里那个账号」的 cookie 发的。
+        //
+        // 所以这里主动推一份过去。**只在「它库里没账号」时才推**，避免每次
+        // 进 PK 页都重跑一遍（那会真打小猿接口，慢且没必要）。
+        // 顺便记住 admin 凭据（管理后台网页要自动登录）。
+        adminCredentials = hs.adminUser?.let { u -> hs.adminPass?.let { p -> u to p } }
+        if (hs.accounts.isEmpty()) {
+            val res = PkNodeSync.syncNow(hs.adminUser, hs.adminPass)
+            AppLogger.i(TAG, "自动推送登录态：${res.message}")
+            // 推完重新 handshake 一次，才能拿到刚导入的 yfdU（决定 H5 的 leoAccountId）
+            PkNodeLink.handshake()?.let { hs = it }
         }
 
         // 把 pk-node 的账号**导入 App 登录态**（用户要求：「管理员的小猿口算账号

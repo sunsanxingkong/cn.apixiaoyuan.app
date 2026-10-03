@@ -73,6 +73,20 @@ class PkAutoHostService : Service() {
     private fun startHosting() {
         running = true
 
+        // 0) ★ 2026-10-03：先把**内置 node** 拉起来。
+        //
+        // 后台挂机的实质是「让 PK H5 一直跑在 WebView 里」，而那个页面来自
+        // 内置 node（`http://127.0.0.1:8792/pk-h5/pk.html`）。服务没起，
+        // 用户从悬浮球回到 App 时 PK 页就是白屏 —— 挂机等于没挂。
+        //
+        // ⚠️ 必须用 **startAsync**（内部走 Dispatchers.IO）：
+        //    `onStartCommand` 跑在**主线程**，而启动流程里有
+        //    ① 解压 2.5MB 工作区、② 最多 20s 的 HTTP 探活轮询。
+        //    在主线程序列化执行会直接 **ANR**（我初版写的 startBlocking
+        //    就是这个错，已改）。这里只是「提前把服务热起来」，
+        //    晚一两秒就绪完全无害 —— 用户此刻还在别的界面。
+        PkHostOrchestrator.startAsync(this)
+
         // 1) 前台通知（保活的地基）。API 34+ 起 startForeground 必须声明 type。
         runCatching {
             createChannelIfNeeded()

@@ -1,15 +1,12 @@
 package cn.apixiaoyuan.app.feature.pk
 
 import android.annotation.SuppressLint
-import cn.apixiaoyuan.app.BuildConfig
 import android.graphics.Bitmap
 import android.net.Uri
-import android.webkit.CookieManager
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -39,41 +36,83 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import cn.apixiaoyuan.app.core.design.icon.AppIcons
-import cn.apixiaoyuan.app.core.oldsimian.PkH5Proxy
+import cn.apixiaoyuan.app.core.log.AppLogger
 import cn.apixiaoyuan.app.core.oldsimian.PkJsInjector
-import cn.apixiaoyuan.app.core.oldsimian.PkWebViewBridge
-import cn.apixiaoyuan.app.core.session.SessionStore
+import cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator
 
 /**
- * 口算 PK 的 H5 容器。
+ * 口算 PK 的 H5 容器（★ 2026-10-03 换成**内置 node 版**）。
  *
- * 这是模块 8 的核心 —— 口算 PK 全部交互在 H5 里，原生只做三件事：
+ * # 架构变了：从「App 自己跑 H5」变成「App 只看一个本机页面」
  *
- *  1. **提供容器**：全屏 WebView，开启 JS 与 DOM Storage
- *  2. **同步登录态**：把原生 [SessionStore] 里存的 cookie 注入
- *     WebView 的 [CookieManager]，让 H5 侧的请求也带上登录态
- *  3. **拦截 scheme**：原版 H5 用 `leo://` scheme 调原生能力，
- *     这里拦截并记录，未实现的先忽略
+ * ## 旧架构（已废弃）
  *
- * **不做的事**：
- *  - 不注入 JS bridge（原版的 `addJavascriptInterface` 暴露了哪些方法
- *    还没从 smali 确证，贸然注入会引入未知行为；等确证后再补）
- *  - 不解析 H5 内部的答题协议（那是 H5 私有协议，原生不参与）
+ * H5 来自小猿 CDN，登录态靠 App 把 cookie 灌进 `CookieManager`，
+ * 业务请求靠 `core/oldsimian/PkH5Proxy` 用 OkHttp 代发，
+ * 原生桥靠 `addJavascriptInterface` 提供 —— 一套**与 pk-node 平行**的实现，
+ * 每个坑都要各修一遍（417 / 登录态 / 串号 / 桥回调协议…）。
  *
- * 关键实现点：**Cookie 同步的时机**。WebView 的 CookieManager 与
- * OkHttp 的 PersistentCookieJar 是两套独立存储 —— H5 发起请求时用的
- * 是 CookieManager 里的 cookie，不是 OkHttp 的。必须在 `loadUrl` 之前
- * 把 SessionStore 里的 cookie 逐个写进 CookieManager，否则 H5 侧
- * 表现为未登录。
+ * ## 新架构
  *
- * @param viewModel PK 状态机
- * @param onFinish   H5 侧要关闭容器时的回调（如 `leo://close`），
- *                   由调用方决定去哪；当前未接线，留出口
+ * ```
+ *  ┌─ App 进程 ─────────────────────────────────────────────┐
+ *  │  PkH5Screen（本文件）                                   │
+ *  │    └─ WebView ──→ http://127.0.0.1:8792/pk-h5/pk.html  │
+ *  │         ▲                        │                      │
+ *  │         │ 只注入 Eruda（JS 控制台）│                      │
+ *  │         │                        ▼                      │
+ *  │  PkWebViewBridge            pk-node（内置 node 子进程）   │
+ *  │   （只答 presetInfo）          ├ 服务端代理全部业务请求     │
+ *  │                              ├ 自带 window 桥（JS 实现）  │
+ *  │                              └ 账号 / 设备链 / 签名 全在它  │
+ *  └────────────────────────────────────────────────────────┘
+ * ```
+ *
+ * **原生侧只剩两件事**：
+ *  1. 起服务（[PkHostOrchestrator]）并把 WebView 指向本机端口；
+ *  2. 注入 JS 控制台（用户明确要求保留）。
+ *
+ * # 三个必须踩对的点
+ *
+ * ## ① **一个 `addJavascriptInterface` 都不能注册**
+ *
+ * pk-node 的 H5 **自带**整套 `window.WebView / CommonWebView / LeoWebView /
+ * LeoSecureWebView`（见其 `H5_INJECT` 的 `HANDLERS`），而它的挂载是
+ * `if (!window[name]) window[name] = bridge` —— **先到先得**。
+ * 宿主若抢注同名对象，pk-node 那套更完整的实现（含 `dataEncrypt` /
+ * `requestConfig`，宿主根本实现不了）会被**静默跳过**，H5 直接残废。
+ *
+ * 详见构造函数里那段注释（我初版写过一个「只让位部分方法」的宿主桥，
+ * 查证 pk-node 的实现后**整段删除**了）。
+ *
+ * ## ② `loadUrl` 只在「原生下发的目标」变化时才发
+ *
+ * H5 是 SPA（hash 路由），内部导航会把 `WebView.url` 改成 `pk.html#/xxx`。
+ * 若用 `view.url != h5Url` 判定，每次重组都会 `loadUrl` → 页面一直刷新。
+ * 所以只认 `(目标 URL, reloadToken)` 这个「原生下发的目标」。
+ *
+ * ## ③ Cookie 同步：**不再需要**
+ *
+ * 旧容器要把 App 的 cookie 灌进 `CookieManager` 才能让 H5 登录；
+ * 现在 H5 的所有业务请求都由 **pk-node 服务端**发出（用**它自己**的账号 jar），
+ * WebView 只需要能打开 `127.0.0.1` 的页面。所以
+ * `syncCookiesToWebView` / `PkH5Proxy` / `SessionStore.pkAccountId` 那一整套
+ * 在本容器里**全部不再参与** —— 串号问题从架构上消失（身份由 URL 上的
+ * `leoAccountId` 在打开那一刻定死，见 [PkHostOrchestrator.h5Url]）。
+ *
+ * ## JS 控制台（用户明确要求保留）
+ *
+ * 走 [PkJsInjector] 的 Eruda（`evaluateJavascript` 注入 `assets/js/eruda.js`
+ * 再 `eruda.init()`），与上面被删掉的宿主桥是两条独立的路，不受影响。
+ * 开关仍是 `OldSimianPrefs.h5DebugConsole`。
+ *
+ * @param viewModel PK 状态机（本容器只用它的进度/标题/重载令牌）
+ * @param onFinish  H5 侧要关闭容器时的回调（如 `leo://close`），由调用方决定去哪
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -81,35 +120,29 @@ fun PkH5Screen(
     viewModel: PkViewModel,
     onFinish: () -> Unit = {},
 ) {
-    
-    // WebView 实例在 composition 期间创建；销毁由 AndroidView 的 onRelease
-    // 负责（不能放 DisposableEffect.onDispose，详见下方 AndroidView 注释）。
     val context = LocalContext.current
+
+    // 进页面就把内置服务拉起来（幂等：已起过直接返回）。
+    // 放在这里而不是 App.onCreate：不逛 PK 的用户不该为 120MB 的 node 付启动时间。
+    DisposableEffect(Unit) {
+        PkHostOrchestrator.startAsync(context)
+        onDispose { }
+    }
+
+    // WebView 实例在 composition 期间创建；销毁由 AndroidView 的 onRelease 负责。
     val webView = remember {
         WebView(context).apply {
             // ---- View 焦点：PK 容器绝不能持有它（真机崩溃的根因）----
             //
-            // 崩溃栈（dropbox data_app_crash@1790394023891，2026-09-26 11:40）：
-            //   Choreographer.doFrame
-            //     → Compose applyChanges (ez0.h / ma.i)
-            //     → ViewGroup.removeViewInLayout
-            //     → ViewGroup.removeViewInternal (ViewGroup.java:5847)
-            //     → View.rootViewRequestFocus (View.java:9103)
-            //     → AndroidComposeView.requestFocus
-            //     → "Compose Runtime internal error
-            //        (pending composition has not been applied)"
+            // 崩溃栈（data_app_crash@1790394023891）：Choreographer.doFrame →
+            // Compose applyChanges → ViewGroup.removeViewInLayout →
+            // View.rootViewRequestFocus → AndroidComposeView.requestFocus →
+            // "pending composition has not been applied"。
             //
-            // 机理：`ViewGroup.removeViewInternal` 发现被移除的 View 正是
-            // `mFocused` 时，会调 `rootViewRequestFocus()` 向上层重新找焦点
-            // 持有者；此刻 Compose 正处在 apply 阶段，焦点落到
-            // `AndroidComposeView` 上便触发重入合成 → 抛错崩溃。
-            //
-            // 而 WebView 天生可聚焦：clickable 的 View 在 touch mode 下触摸即
-            // `requestFocus()`。所以「点一下 PK 页面，再返回」必然命中这条路径。
-            //
-            // 这里设 `isFocusable=false` 从源头断掉；**不动**
-            // `descendantFocusability`，保留 WebView 内部 input 弹输入法的能力
-            // （HTML 输入焦点走 chromium 内部子 View，不依赖 WebView 自身可聚焦）。
+            // 机理：移除的 View 正是 mFocused 时，ViewGroup 会向上重新找焦点持有者，
+            // 而此刻 Compose 正在 apply 阶段 → 重入合成 → 崩。
+            // WebView 天生可聚焦（touch mode 下触摸即 requestFocus），
+            // 所以「点一下页面再返回」必然命中。这里从源头断掉。
             isFocusable = false
             isFocusableInTouchMode = false
 
@@ -118,101 +151,75 @@ fun PkH5Screen(
                 domStorageEnabled = true
                 loadsImagesAutomatically = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                // UA 追加小猿口算客户端标识：
-                // PK H5 的请求层按 UA 里的版本决定**是否走 requestConfig 桥**：
-                //   `isAndroid() && version >= 3.42.0 && url 含 {client}/{device}`
-                //     → 交给原生解析 URL（带 sign）
-                //     → 否则自己把 {client} 替换成 "api" 发出去（必然 417）
-                // 所以这个版本号是「H5 能否正确拿到登录态数据」的开关，别删。
-                //
-                // ⚠️ 版本必须是**纯净的 `x.y.z`**（2026-09-29 实测）。
-                // H5 用严格正则从 UA 取版本：
-                //   /\s+(...|YuanSouTiKouSuan|...)\/(\d+\.\d+\.\d+)(\s+|$)/i
-                // 尾部要求「数字.数字.数字」后跟空白或结束 —— 带后缀（如
-                // `3.141.1-abc1234`）会**整体匹配失败并返回空串**，H5 于是发出
-                // `...?version=`（空）→ 417「获取banner数据失败」。
-                //
-                // root cause 已在 build.gradle.kts 去掉 versionNameSuffix；
-                // 这里再 `substringBefore('-')` 兜一道，防止将来又被加回后缀。
-                val uaVersion = BuildConfig.VERSION_NAME.substringBefore('-')
-                userAgentString = "$userAgentString YuanSouTiKouSuan/$uaVersion"
-                cn.apixiaoyuan.app.core.log.AppLogger.i("PkH5", "WebView UA = $userAgentString")
+                // UA 由 pk-node 在页面里自己伪装（它 patch `navigator.userAgent` 加
+                // `YuanSouTiKouSuan/3.141.1`）。宿主这边**不再**追加 ——
+                // 追加会让 UA 里出现两段版本号，H5 的严格正则可能取到错误的那个。
+                AppLogger.i("PkH5", "WebView UA = $userAgentString")
             }
 
-            // 原生桥。H5 按**方法前缀**选对象名，前缀与方法名分开：
-            //  无前缀        → window.WebView.<method>
-            //  common_xxx   → window.CommonWebView.<method>
-            //  leo_xxx      → window.LeoWebView.<method>
-            //  LeoSecure_xx → window.LeoSecureWebView.<method>
-            // 找不到对象时统一回退到 window.LeoWebView.callNative(b64)。
+            // ★★ 宿主**刻意不注册任何 `addJavascriptInterface`**。
             //
-            // ⚠️ 四个名字必须都注册：`common_getUserInfo`（首屏用户态的唯一来源）
-            // 只会在 `CommonWebView` 或 `LeoWebView.callNative` 上落地，
-            // 少注册 = H5 永远拿不到登录态（真机症状：首屏「一年级 / 0 胜 / 胜率 0%」）。
-            val bridge = PkWebViewBridge(context.applicationContext, this)
-            // ★ 2026-10-03：把「PK 主页面 URL」喂给桥 —— closeWebView 在历史退不回去时
-            //   靠它兜底回填，避免「弹窗关不掉 / 卡在下级页」。
-            bridge.homeUrl = viewModel.h5Url
-            addJavascriptInterface(bridge, "WebView")
-            addJavascriptInterface(bridge, "CommonWebView")
-            addJavascriptInterface(bridge, "LeoWebView")
-            addJavascriptInterface(bridge, "LeoSecureWebView")
-
-            // 同步登录态：把 SessionStore 的 cookie 写进 CookieManager。
-            // 必须在**首次** loadUrl 之前 —— WebView 用 CookieManager 发请求，
-            // 不是用 OkHttp 的 PersistentCookieJar。
+            // ## 为什么（2026-10-03 决定，验证过 pk-node 的实现后推翻了自己的初版设计）
             //
-            // ⚠️ 这里**只在创建时同步一次**。此前同步放在 `AndroidView.update` 里
-            // 「每次重组都跑」，而 `syncCookiesToWebView` 结尾有
-            // `CookieManager.flush()`（**磁盘 I/O**）。PK 的 H5 是 SPA，内部导航会
-            // 反复触发 onPageStarted / onPageFinished → `setProgress` 改状态 →
-            // 重组 → 又一次 flush…… 形成「重组→flush→重组」的自激循环，
-            // 表现就是**PK 页面一闪一闪**。登录态后续刷新的场景由
-            // `AndroidView.update` 里带守卫的那次同步兜底（见下方 loadedTarget 块）。
-            CookieManager.getInstance().apply {
-                setAcceptCookie(true)
-            }
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            syncCookiesToWebView(viewModel.h5Url)
+            // pk-node 的 H5 **自带完整的 `window` 桥**（见其 `H5_INJECT` 的
+            // `HANDLERS`）：`getUserInfo` / `getWebViewInfo` / `getDeviceInfo` /
+            // `requestConfig` / `dataEncrypt` / `dataDecrypt` / `openWebView` /
+            // `closeWebView` … 全部在**页面里用 JS 实现**，且它的挂载方式是
+            // `if (!window[name]) window[name] = bridge` —— **先到先得**。
+            //
+            // 也就是说：宿主只要用 `addJavascriptInterface` 抢注 `CommonWebView`
+            // 之类的名字，pk-node 那套更完整的实现就会被**静默跳过**，
+            // 而宿主的 Java 对象不可能实现得了 `dataEncrypt`（要拿 node 的密钥流）、
+            // `requestConfig`（要拿账号 jar）—— 结果是 H5 直接残废。
+            //
+            // 初版我写过一个「只对少量方法名回 true、其余让位」的桥
+            // （靠 `hasNativeMethod` 返回 false 让调用落到 JS 层）。
+            // 但查证后发现：
+            //   ① H5 实际会调的方法（`getWebViewInfo` / `getDeviceInfo` /
+            //      `getBasicInfo` / `getUserInfo`）pk-node **全都实现了**；
+            //   ② 它**从不调** `presetInfo` —— 我原本打算处理的正是这一个。
+            // 于是那个桥 100% 只会「遮蔽好的、提供没用的」，且还押注在一个
+            // 未经验证的 WebView 行为上（`hasNativeMethod=false` 是否真的
+            // 让同一对象的 JS 属性在页面里可见）。**风险大于收益，整段删掉。**
+            //
+            // ## 那 JS 控制台怎么办（用户要求「那个 js 控制台还是要的」）
+            //
+            // 控制台走 `onPageFinished` 里的 `PkJsInjector`（Eruda），
+            // 那是 **`evaluateJavascript` 注入**，与 `addJavascriptInterface`
+            // 是两条完全独立的路 —— 不需要宿主桥。见下方 `onPageFinished`。
 
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     viewModel.setProgress(5)
                     viewModel.webError = null
                     // 重置注入标记：同一次加载 onPageFinished 可能回调多次，
-                    // 不重置会导致「老挂戏老叟」脚本被叠加注入多轮。
+                    // 不重置会导致脚本（尤其带 setInterval 的）被叠加注入多轮。
                     view?.let { PkJsInjector.markPageStarted(it) }
                 }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     viewModel.setProgress(100)
                     view?.title?.takeIf { it.isNotBlank() }?.let { viewModel.webTitle = it }
-                    // ★ 2026-09-30：无条件记录 —— 先钉死「H5 到底有没有加载完、URL 是啥」。
-                    cn.apixiaoyuan.app.core.log.AppLogger.i("PkH5", "onPageFinished: $url")
-                    // ★★ 关键取证：H5 加载完后，把**页面可见文本**打出来。
-                    //   真机上 PK H5 已加载（onPageFinished 有）、桥也部分被调，
-                    //   但一个 HTTP 请求都没发。此时「页面显示什么」是唯一能一眼
-                    //   判断卡在哪一步的证据（「登录后开始PK」= 未登录分支；
-                    //   「更多模式，敬请期待」= 已登录但入口没渲染）。
+                    AppLogger.i("PkH5", "onPageFinished: $url")
+                    // 取证：页面可见文本（一眼判断卡在哪一步）
                     view?.evaluateJavascript(
                         "(function(){try{return (document.body&&document.body.innerText||'')" +
                             ".replace(/\\s+/g,' ').slice(0,300)}catch(e){return 'ERR:'+e}})()",
-                    ) { v ->
-                        cn.apixiaoyuan.app.core.log.AppLogger.i("PkH5", "页面文本: $v")
-                    }
+                    ) { v -> AppLogger.i("PkH5", "页面文本: $v") }
+                    // 取证：桥归谁了。pk-node 的桥挂上后 `window.LeoWebView` 存在，
+                    // 且它下面应该有 `callNative`（宿主**没有**提供这个）。
                     view?.evaluateJavascript(
-                        "(function(){try{return ['WebView','CommonWebView','LeoWebView'," +
-                            "'LeoSecureWebView'].map(function(k){return k+'='+!!window[k]}).join(',')" +
-                            "+(window.LeoWebView&&window.LeoWebView.getBasicInfo?' +getBasicInfo':' -getBasicInfo')" +
+                        "(function(){try{var ks=['WebView','CommonWebView','LeoWebView','LeoSecureWebView'];" +
+                            "return ks.map(function(k){return k+'='+(typeof window[k])}).join(',')" +
+                            "+';LeoCallNative='+(window.LeoWebView&&typeof window.LeoWebView.callNative)" +
+                            "+';PK_ID='+(window.__PK_LEO_ID||'-');" +
                             "}catch(e){return 'ERR:'+e}})()",
-                    ) { v ->
-                        cn.apixiaoyuan.app.core.log.AppLogger.i("PkH5", "桥对象: $v")
-                    }
-                    // 「老挂戏老叟」PK 侧注入：去排行榜动效 / 结算页自动开下一局。
-                    // 本项目 PK 容器是自己的 WebView，直接 evaluateJavascript 即可，
-                    // 不需要像 cn.nizou.sxd 那样 hook 宿主的 loadUrl。
+                    ) { v -> AppLogger.i("PkH5", "桥对象: $v") }
+                    // 「老挂戏老叟」的注入（去动画 / 自动下一局 / 自动画笔 / **JS 控制台**）。
+                    // 前三个依赖 Vue 树（与宿主实现无关），控制台是 Eruda。
                     view?.let { PkJsInjector.injectIfEnabled(it) }
                 }
-                
+
                 override fun onReceivedError(
                     view: WebView?,
                     request: WebResourceRequest?,
@@ -224,7 +231,7 @@ fun PkH5Screen(
                         viewModel.setProgress(0)
                     }
                 }
-                
+
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: WebResourceRequest?,
@@ -233,98 +240,23 @@ fun PkH5Screen(
                     return handleScheme(url, onFinish)
                 }
 
-                /**
-                 * 主域业务请求改由原生代发（补公共参数 / sign / 风控头 / Cookie）。
-                 *
-                 * 原因见 [PkH5Proxy] 的 KDoc：项目那些头挂在 OkHttp 上，
-                 * 而 H5 的请求是 WebView 自己发的，根本带不上。
-                 *
-                 * ## ⚠️ 必须跳过主文档（2026-09-27 踩坑）
-                 *
-                 * `shouldInterceptRequest` 会拦**所有**请求，**包括 `pk.html` 本身**。
-                 * 若把主文档也代发，`WebResourceResponse` 必须完整还原响应头，
-                 * 否则会出现「页面显示网页源码」：
-                 *  - OkHttp 返回的 body 是**已解压**的，但响应头里还留着
-                 *    `Content-Encoding: gzip` → WebView 二次解压失败或当纯文本渲染；
-                 *  - `Content-Length` 是压缩前的长度，与实际不符；
-                 *  - `Content-Type` 若被改写，WebView 就不再按 HTML 解析。
-                 * 所以主文档**一律交回 WebView 自己加载**。
-                 *
-                 * 任何异常都返回 null → 交回 WebView 原样发，**绝不影响页面加载**。
-                 */
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                ): WebResourceResponse? {
-                    val req = request ?: return null
-                    // 主文档不代理：交给 WebView 原生加载（含其自身的压缩/编码处理）。
-                    if (req.isForMainFrame) return null
-                    val method = req.method ?: return null
-                    val url = req.url?.toString() ?: return null
-                    // ★ 2026-09-30：把「**像业务接口**的子请求」打出来，用于区分
-                    //   「H5 压根没发请求」vs「发了但没进代理」。
-                    //
-                    // ⚠️ 过滤必须收紧，否则会把几十个 js/css/png 全打出来 → 又刷屏。
-                    //   只留：自有域 + 路径以 /leo- 或 /math/ 或 /api/ 开头（业务接口特征）。
-                    val host = runCatching { java.net.URI(url).host ?: "" }.getOrDefault("")
-                    val isOwnHost = host.endsWith("yuanfudao.com") || host.endsWith("yuanfudao.biz")
-                    // ★ 2026-09-30：先记录**所有自有域**请求（不只业务接口），
-                    //   否则分不清「H5 压根没发请求」vs「发了但被上面的关键字过滤掉」。
-                    if (isOwnHost) {
-                        cn.apixiaoyuan.app.core.log.AppLogger.d(
-                            "PkH5Proxy",
-                            "子请求 ${req.method} $url 代理=${PkH5Proxy.shouldProxy(method, url)}",
-                        )
-                    }
-                    if (!PkH5Proxy.shouldProxy(method, url)) return null
-
-                    val headers = runCatching { req.requestHeaders.orEmpty() }.getOrDefault(emptyMap())
-                    val body = if (method.equals("GET", true)) null else readRequestBody(req)
-                    val resp = PkH5Proxy.fetch(method, url, headers, body) ?: return null
-                    return runCatching {
-                        // 只保留**内容语义相关**且已与实际 body 一致的头。
-                        //
-                        // 不能整包透传 OkHttp 的响应头：body 已被 OkHttp 解压，
-                        // 而 `Content-Encoding` / `Content-Length` 描述的是**传输态**，
-                        // 原样交给 WebView 会导致解码错乱（表现为显示源码 / 空白页）。
-                        val safeHeaders = resp.headers
-                            .filterKeys { it.equals("Content-Type", true) }
-                            .mapValues { (_, v) -> v.firstOrNull().orEmpty() }
-                        WebResourceResponse(
-                            resp.contentType,
-                            "UTF-8",
-                            resp.statusCode,
-                            statusPhrase(resp.statusCode),
-                            safeHeaders,
-                            resp.body,
-                        )
-                    }.getOrNull()
-                }
-
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
                 override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                     return url?.let { handleScheme(it, onFinish) } ?: false
                 }
+
+                // ★★ 注意：本容器**不再实现 `shouldInterceptRequest`**。
+                //
+                // 旧容器要拦自有域请求、改用 OkHttp 代发（补 sign / 风控头 / cookie）。
+                // 现在这些请求根本不在 WebView 里发出 —— pk-node 的 H5 会把它们
+                // XHR 到同源的 `/api/pk/h5/api`，由 **node 服务端**转发
+                // （那是它能拿到账号 jar 与设备链的地方）。
+                // 宿主再插一手只会画蛇添足（且拿不到 pk-node 的 cookie）。
             }
 
-            // ★★ 2026-09-30：把 H5 自己的 console 落盘 —— 「PK 没有登录态」的
-            //   唯一可靠取证手段。
-            //
-            // 背景：H5 首屏「一年级 / 0 胜 / 胜率 0%」，我们只看到 getUserInfo 被调、
-            // 却看不到任何业务请求（`getHomepage` 从未发出）。要判定是
-            //   (a) isLogin=false 走了「登录后开始PK」分支，还是
-            //   (b) isLogin=true 但后续某步挂了，
-            // 只能看 H5 自己的推理。原版 index-legacy 里正好有几条关键 console：
-            //
-            //   `console.log(">>>>>>>>>最终结果", err, extData)`  ← getUserInfo 桥的返回值
-            //   `at("webviewLogin", r[0])`                        ← 写进 store 的 userInfo
-            //
-            // 没有它就只能靠猜 —— 这正是本项目反复踩坑的根源。
-            //
-            // ⚠️ 过滤：只落「像业务诊断」的行（H5 的关键 console + 错误），
-            //    不把 H5 的一堆 info 全打进来（否则又刷屏）。
+            // H5 的 console 落盘：这是排障的唯一可靠证据来源
+            // （「H5 到底走到哪一步」只能看它自己的推理）。
             webChromeClient = object : WebChromeClient() {
-                // ★ 前若干条 console 无条件记录 —— 验证 onConsoleMessage 到底有没有被调用。
                 private var seen = 0
                 override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
                     val m = msg ?: return false
@@ -335,10 +267,11 @@ fun PkH5Screen(
                         text.contains("isLogin") ||
                         text.contains("homepage") ||
                         text.contains("userInfo") ||
+                        text.contains("eruda") ||
                         m.messageLevel() == ConsoleMessage.MessageLevel.ERROR
                     if (keep) {
                         seen++
-                        cn.apixiaoyuan.app.core.log.AppLogger.d(
+                        AppLogger.d(
                             "PkH5JS",
                             "[${m.messageLevel()}] ${m.sourceId()}:${m.lineNumber()} $text",
                         )
@@ -348,158 +281,194 @@ fun PkH5Screen(
             }
         }
     }
-    
+
     // 原生**主动驱动加载**的目标 URL。
     //
-    // 只认这个值，绝不用 `WebView.url` 做判断 —— PK H5 是 SPA（hash 路由），
-    // H5 内部导航会把 `WebView.url` 改写成 `pk.html#/xxx`，此时
-    // `view.url != h5Url` **恒为真** → `AndroidView.update` 每次重组都 loadUrl
-    // → 表现就是「PK 页面一直在刷新」。
-    //
-    // 这里记住「原生最近一次下发的目标」：只有目标变化，或用户显式重试
-    // （reloadToken 递增）才重新加载。H5 内部的导航完全不触发原生 loadUrl，
-    // 也就不再打断 SPA 自身的路由。
+    // 只认这个值，绝不用 `WebView.url` 做判断 —— H5 是 SPA（hash 路由），
+    // 内部导航会把 `WebView.url` 改成 `pk.html#/xxx`，此时
+    // `view.url != h5Url` **恒为真** → update 每次重组都 loadUrl
+    // → 表现就是「PK 页面一直刷新」。
     var loadedTarget by remember { mutableStateOf<Pair<String, Int>?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
-            // 注意：这里**不能** destroy WebView —— 销毁已移交给 AndroidView 的
-            // onRelease（见下方 AndroidView）。onDispose 与合成同帧同步执行，
-            // 此时 WebView 正在被移出视图树，destroy 会与 requestFocus 重入竞争
-            // 导致 Compose 运行时崩溃。这里只做非破坏性的清理。
-            //
-            // clearFocus 是必要的一半：即使 WebView 本身不可聚焦
-            // （见构造处的 isFocusable=false），focus 也可能落在它的某个子 View 上，
-            // removeViewInternal 同样会走 rootViewRequestFocus 那条崩溃路径。
+            // 不能在这里 destroy（见 AndroidView.onRelease 的注释），
+            // 只做非破坏性清理。
             runCatching { webView.clearFocus() }
             runCatching { webView.stopLoading() }
         }
     }
 
-    // ---- 系统返回键 ----
-    //
-    // 语义对齐原版容器（BaseWebApp 的返回 = 先退 H5 历史，退无可退才关容器）：
-    //  1. H5 自己有历史（含 SPA 的 pushState/hash 导航，Chromium 会记进
-    //     navigation controller）→ `goBack()`，不退容器；
-    //  2. 已在 H5 首页 → 回调 [onFinish]，由调用方决定去哪。
-    //     [PkScreen] 传的是 `popBackStack<RouteHome>`，即回主页。
+    // ---- 系统返回键：先退 H5 历史，退无可退才关容器 ----
     BackHandler(enabled = true) {
         goBackOrFinish(webView, onFinish)
     }
-    
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            
-            // ---- 顶部进度条 ----
-            //
-            // 只在**首次加载**显示（`loadedTarget` 为空 = 还没加载过）。
-            //
-            // 之前是 `webProgress in 1..99` 就显示，而 PK 的 H5 是 SPA：内部路由
-            // （`pk.html#/xxx`）会反复触发 onPageStarted(5) / onPageFinished(100)，
-            // 进度条于是**反复出现又消失**，看起来就是页面一闪一闪（用户反馈）。
-            // 首次加载完成后不再显示，把 SPA 的内部导航交给 H5 自己。
-            if (viewModel.webProgress in 1..99 && loadedTarget == null) {
-                LinearProgressIndicator(
-                    progress = { viewModel.webProgress / 100f },
-                    modifier = Modifier.fillMaxWidth(),
-                )
+
+    val hostState = PkHostOrchestrator.state
+    val targetUrl = PkHostOrchestrator.h5Url()
+
+    Column(modifier = Modifier.fillMaxSize()) {
+
+        // 顶部进度条：只在**首次加载**显示（SPA 内部导航不显示，否则一闪一闪）
+        if (viewModel.webProgress in 1..99 && loadedTarget == null) {
+            LinearProgressIndicator(
+                progress = { viewModel.webProgress / 100f },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        // 标题栏（返回按钮 + 标题 + 加载圈）
+        //
+        // ⚠️ 它必须在内容区**之外**：内置服务启动中 / 出错时下面会盖一层
+        // 提示卡，若提示卡连标题栏一起盖住，用户就连「返回」都点不到了
+        // （实测踩过：卡在启动失败时只能杀进程）。
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = { goBackOrFinish(webView, onFinish) }) {
+                Icon(imageVector = AppIcons.Back, contentDescription = "返回")
             }
-            
-            // ---- 标题栏 ----
-            //
-            // 返回按钮是原版有、而此前这里漏掉的：原版 PK 走独立的 WebApp
-            // Activity（`BaseWebAppActivity`），它的标题栏由容器统一提供返回控件，
-            // 点它 = 退 H5 历史 / 关容器回主页。这里此前只有 `Text(webTitle)`，
-            // 用户点不到「返回」，只能靠系统返回键 —— 这就是「点 PK 页返回按钮
-            // 没法像原版一样回主页」的原因。
-            //
-            // 语义与 [BackHandler] 完全一致，共用 [goBackOrFinish]，避免两处
-            // 行为漂移。
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { goBackOrFinish(webView, onFinish) }) {
-                    Icon(
-                        imageVector = AppIcons.Back,
-                        contentDescription = "返回",
-                    )
-                }
-                Text(
-                    text = viewModel.webTitle,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (viewModel.loading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                    )
-                }
+            Text(
+                text = viewModel.webTitle,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (viewModel.loading) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
             }
-            
-            // ---- WebView ----
+        }
+
+        // ---- 内容区（WebView + 各种覆盖层）----
+        Box(modifier = Modifier.weight(1f)) {
             AndroidView(
                 factory = { webView },
                 modifier = Modifier.fillMaxSize(),
                 update = { view ->
-                    // ⚠️ **不要**在这里无条件调 `syncCookiesToWebView()`。
-                    //
-                    // 此前那版放在这里，导致 PK 页一闪一闪：该函数结尾有
-                    // `CookieManager.flush()`（磁盘 I/O）；SPA 内部导航反复触发
-                    // `onPageStarted`/`onPageFinished` → `setProgress` 改状态 → 重组
-                    // → 再一次 flush → …… 形成自激循环。
-                    //
-                    // 现在只在**「原生下发的加载目标」发生变化**（即真的要重新加载）
-                    // 时才同步一次，与加载判定共用同一个守卫，天然去重。
-                    val target = viewModel.h5Url to viewModel.reloadToken
+                    // 注意：这里**没有** cookie 同步 —— 见本文件 KDoc 的「③」。
+                    // 也没有无条件 loadUrl（那会造成 SPA 反复重载）。
+                    val url = PkHostOrchestrator.h5Url() ?: return@AndroidView
+                    val target = url to viewModel.reloadToken
                     if (viewModel.webError == null && target != loadedTarget) {
                         loadedTarget = target
-                        // 顺序要紧：先同步 cookie，再 loadUrl（WebView 用 CookieManager 发请求）。
-                        syncCookiesToWebView(viewModel.h5Url)
-                        view.loadUrl(viewModel.h5Url)
+                        AppLogger.i("PkH5", "加载内置 pk-node H5：$url")
+                        view.loadUrl(url)
                     }
                 },
-                // 销毁必须交给 AndroidView 的 onRelease：它在 View 被移出视图树
-                // **之后**才回调。此前放在 DisposableEffect(Unit).onDispose 里会崩：
-                // 返回时 Compose 先 removeViewInLayout 摘掉 WebView，摘除过程触发
-                // requestFocus → 重入合成；而 onDispose 与合成同帧同步执行 destroy()，
-                // 两者竞争抛出 "pending composition has not been applied"
-                // （真机崩溃栈底：ViewGroup.removeViewInLayout → ... → requestFocus）。
+                // 销毁交给 onRelease：它在 View 被移出视图树**之后**才回调。
+                // 放在 DisposableEffect.onDispose 里会与 requestFocus 重入竞争崩溃。
                 onRelease = { view -> releaseWebView(view) },
             )
-        }
-        
-        // ---- 错误覆盖层 ----
-        viewModel.webError?.let { err ->
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Card(modifier = Modifier.padding(24.dp)) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Text(
-                            text = err,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = viewModel.h5Url,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        TextButton(onClick = { viewModel.reload() }) { Text("重试") }
+
+            // ---- 就绪前的覆盖层 / 失败提示 ----
+            //
+            // 内置 node 首次启动要解压工作区 + 起进程 + 等探活，真机约 1~3 秒。
+            // 期间**没有 URL 可加载**（[PkHostOrchestrator.h5Url] 返回 null），
+            // 必须给用户一个明确的「正在启动内置服务」，而不是白屏。
+            when (hostState) {
+                PkHostOrchestrator.State.Idle,
+                PkHostOrchestrator.State.Starting,
+                -> HostNotice(
+                    title = "正在启动内置服务…",
+                    detail = "首次启动需要解压并拉起 node（约 2 秒）",
+                    busy = true,
+                )
+
+                is PkHostOrchestrator.State.Failed -> HostNotice(
+                    title = "内置服务启动失败",
+                    detail = hostState.message,
+                    actionText = "重试",
+                    onAction = {
+                        // 重置编排状态后重起 —— 否则 started 标记会让 startAsync 直接返回。
+                        PkHostOrchestrator.stop()
+                        PkHostOrchestrator.startAsync(context)
+                    },
+                )
+
+                is PkHostOrchestrator.State.Ready -> {
+                    if (targetUrl == null) {
+                        // 就绪了却拿不到 URL —— 极少见（服务活着但没报 h5Base），兜个底。
+                        HostNotice(title = "内置服务已就绪，但没拿到 H5 地址", detail = "请重试")
                     }
+                    if (hostState.accountCount == 0) {
+                        AppLogger.w(
+                            "PkH5",
+                            "pk-node 里还没有小猿账号 —— PK 页会显示未登录。" +
+                                "请在 pk-node 管理后台加一个账号（或从 App 的账号页导入）。",
+                        )
+                    }
+                }
+            }
+
+            // ---- H5 主文档级错误覆盖层 ----
+            viewModel.webError?.let { err ->
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Card(modifier = Modifier.padding(24.dp)) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                text = err,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = targetUrl ?: "(内置服务未就绪)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            TextButton(onClick = { viewModel.reload() }) { Text("重试") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 「内置服务启动中 / 失败」的提示卡。 */
+@Composable
+private fun HostNotice(
+    title: String,
+    detail: String,
+    busy: Boolean = false,
+    actionText: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Card(modifier = Modifier.padding(24.dp)) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (busy) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(14.dp))
+                }
+                Text(text = title, style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (actionText != null && onAction != null) {
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = onAction) { Text(actionText) }
                 }
             }
         }
@@ -509,15 +478,11 @@ fun PkH5Screen(
 /**
  * 「返回」的统一实现：先退 H5 历史，退无可退才关容器回主页。
  *
- * 标题栏的返回按钮与系统返回键（[BackHandler]）**共用**这一个实现，
- * 保证两条入口行为一致 —— 此前标题栏根本没有返回控件，只能在系统返回键里
- * 写内联逻辑，改一处漏一处。
+ * 标题栏返回按钮与系统返回键（[BackHandler]）**共用**这一个实现，
+ * 保证两条入口行为一致。
  *
  * H5 的 hash 路由导航（SPA 的 `#/xxx`）会被 Chromium 记进 navigation
  * controller，所以 `canGoBack()` 同样覆盖 SPA 内部的前进后退。
- *
- * @param webView   PK 容器
- * @param onFinish  H5 首页再返回时的回调（由 [PkScreen] 决定，当前 = 回主页）
  */
 private fun goBackOrFinish(webView: WebView, onFinish: () -> Unit) {
     if (webView.canGoBack()) webView.goBack() else onFinish()
@@ -526,25 +491,18 @@ private fun goBackOrFinish(webView: WebView, onFinish: () -> Unit) {
 /**
  * 安全销毁 WebView（由 AndroidView 的 onRelease 调用，此时 View 已移出视图树）。
  *
- * 顺序是有讲究的，真机崩溃倒逼出的三条：
+ * 顺序有讲究（真机崩溃倒逼出的三条）：
+ *  1. **先 clearFocus**：若 WebView 或其子 View 仍持焦点，
+ *     `removeViewInternal` 会走 `rootViewRequestFocus()` → 重入合成崩溃。
+ *  2. **清空回调与 JS 开关**：`webViewClient` 持有 viewModel 与 onFinish 引用，
+ *     不清会让整棵 Activity 泄漏；关 JS 阻断页面里还在跑的定时器继续回调原生。
+ *  3. **stopLoading 再 destroy**：否则网络线程回调已销毁的 WebView
+ *     会触发 chromium 的 native 层崩溃。
  *
- *  1. **先从父容器摘除**。onRelease 时通常已被摘除，但若 View 仍挂在某个
- *     ViewGroup 上，直接 destroy 会让父容器在后续布局/焦点遍历中碰到已销毁的
- *     实例。用 runCatching 包住是因为"已不在树里"是常态，抛异常无意义。
- *  2. **清空回调与 JS 开关**。webViewClient 持有 viewModel 与 onFinish 引用，
- *     不清会让整棵 Activity 泄漏到 WebView 的内部线程；同时关掉 JS 阻断
- *     页面里还在跑的定时器继续回调原生。
- *  3. **stopLoading 再 destroy**。destroy 前必须停掉未完成的加载，否则
- *     网络线程回调已销毁的 WebView 会触发 native 层崩溃（chromium）。
- *
- * 整个流程用 runCatching 兜底：销毁阶段的任何异常都不该升级成用户可见的崩溃。
+ * 全程 `runCatching`：销毁阶段的异常不该升级成用户可见的崩溃。
  */
 private fun releaseWebView(view: WebView) {
     runCatching {
-        // 先清焦点：removeView 时若 WebView 或其子 View 仍持有焦点，
-        // ViewGroup.removeViewInternal 会走 rootViewRequestFocus()，
-        // 把焦点交给 AndroidComposeView → 重入合成崩溃
-        // （真机栈见构造处 isFocusable 的注释）。clearFocus 要在 destroy 之前。
         view.clearFocus()
         view.stopLoading()
         view.webViewClient = WebViewClient()
@@ -554,193 +512,29 @@ private fun releaseWebView(view: WebView) {
         view.destroy()
     }
 }
-/**
- * 把 [SessionStore] 里的登录态 cookie 同步进 WebView 的 CookieManager。
- *
- * 这是 H5 侧能识别登录态的唯一通道 —— CookieManager 与 OkHttp 的
- * [cn.apixiaoyuan.app.core.session.PersistentCookieJar] 是两套独立存储。
- *
- * 三个必须踩对的点：
- *
- *  1. **URL 必须是合法 host**。真机 cookie 里 `ks_*` 那批挂在
- *     `.yuanfudao.com`（带前导点，hostOnly=false），直接拼
- *     `https://.yuanfudao.com` 不是合法 URL，`setCookie` 会静默失败。
- *     这里去掉前导点，并对每个 cookie 各自的 domain 调一次。
- *
- *  2. **每个 cookie 按其 domain 落盘**，不能全塞到 H5 页面 host 下 ——
- *     cookie 的 domain 归属由服务端 `Set-Cookie` 决定，WebView 发请求时
- *     按 RFC 6265 匹配，放错域等于没放。
- *
- *  3. **expires 用 HTTP 日期格式**，不是 epoch 毫秒。
- *     `CookieManager.setCookie` 解析 `Expires=` 时按 `EEE, dd MMM yyyy HH:mm:ss z`
- *     解析，写数字会被忽略，cookie 退化成会话 cookie，WebView 进程一回收就丢。
- *
- * @param pageUrl H5 入口 URL，仅用于兜底 —— domain 为空的条目落到它上面。
- */
-private fun syncCookiesToWebView(pageUrl: String) {
-    val cm = CookieManager.getInstance()
-    // PK H5 页面的实际 host。cookie 必须落到这个 host 下（或它的父域），
-    // WebView 发请求时才按 RFC 6265 匹配得上。
-    val pageHost = runCatching { java.net.URI(pageUrl).host }.getOrNull()
-        ?: "xyks.yuanfudao.com"
-
-    // ★★ 2026-10-03 修串号：先**清掉本 host 下的旧 cookie**，再写当前账号的。
-    //
-    // 为什么必须清：CookieManager 是**持久**的（还会 flush 到磁盘）。
-    // 上一号切走后，它的 `sid`/`sess`/`userid`/`ks_*` 仍留在里面；
-    // 只 setCookie 覆盖同名项的话，那些**名字不同**的残留会继续被发出去
-    // （例如旧号的 `ks_persistent`）→ 服务端按残留值判身份 → 串号。
-    //
-    // 只清与自有域相关的 cookie，不动 WebView 里其它站点（PK 页会加载 CDN 资源）。
-    runCatching {
-        val existing = cm.getCookie("https://$pageHost") ?: ""
-        existing.split(";").forEach { kv ->
-            val name = kv.trim().substringBefore('=')
-            if (name.isNotBlank()) {
-                cm.setCookie("https://$pageHost", "$name=; path=/; domain=.${
-                        rawHost(pageHost)
-                    }; Max-Age=0")
-            }
-        }
-    }
-
-    // 取「PK 页固化的身份」对应的 cookie（不是全局当前身份）。
-    val pkAccount = SessionStore.pkAccountId
-    SessionStore.loadCookies().forEach { entry ->
-        if (entry.value.isEmpty()) return@forEach
-        // ★ 关键修复（2026-09-26）：cookie domain 必须带前导点，
-        // 否则 CookieManager 会把它当 host-only cookie，只匹配裸域
-        // `yuanfudao.com`，**不匹配** `xyks.yuanfudao.com` → PK H5 表现为未登录。
-        //
-        // 原版 WebView 的 cookie host_key 实测全是 `.yuanfudao.com`（带前导点，
-        // domain cookie，匹配所有子域）；而 App 的 SessionStore 存的是
-        // `yuanfudao.com`（无前导点，host-only）。这里统一补前导点，
-        // 与真机地面真值对齐。
-        val rawDomain = entry.domain.removePrefix(".")
-        // 统一补前导点：domain cookie 才能匹配所有子域。
-        val domain = ".$rawDomain"
-        // ★ 修串号：`userid` 换成 PK 页固化的身份，与 `PkH5Proxy` 的出站 cookie 一致。
-        val value = if (entry.name == "userid" && pkAccount != null && pkAccount > 0) {
-            pkAccount.toString()
-        } else {
-            entry.value
-        }
-        val cookieString = buildString {
-            append(entry.name).append('=').append(value)
-            append("; domain=").append(domain)
-            append("; path=").append(entry.path.ifEmpty { "/" })
-            if (entry.expiresAt > 0L) {
-                append("; expires=").append(httpDate(entry.expiresAt))
-            }
-            if (entry.secure) append("; Secure")
-        }
-        // setCookie 的 URL 必须用 PK H5 实际 host（xyks.yuanfudao.com），
-        // 这样带前导点的 domain cookie 才会被登记为「匹配该 host 及其子域」。
-        cm.setCookie("https://$pageHost", cookieString)
-    }
-    cm.flush()
-    // ★ 诊断（2026-09-28）：H5 的登录态完全取决于「这批 cookie 到底写没写进去」，
-    //   而 `setCookie` 失败是**静默**的（domain 不合法/URL 不合法都不报错）。
-    //   这里把关键角色的存在性打出来，真机一眼可判定是「没同步」还是「同步了但 H5 不认」。
-    val names = SessionStore.loadCookies().map { it.name }.toSet()
-    cn.apixiaoyuan.app.core.log.AppLogger.i(
-        "PkH5",
-        "cookie 同步 → host=$pageHost 共 ${names.size} 条；" +
-            "sid=${if ("sid" in names) "有" else "无"} " +
-            "sess=${if ("sess" in names) "有" else "无"} " +
-            "userid=${SessionStore.cookie("userid") ?: "无"} " +
-            "ks_deviceid=${SessionStore.cookie("ks_deviceid") ?: "无"}",
-    )
-}
-
-/**
- * 从 host 取出「可加前导点的父域」。
- *
- * `xyks.yuanfudao.com` → `yuanfudao.com`（用于拼 `.yuanfudao.com` 这种 domain）。
- * 只保留最后两段 —— 本项目涉及的域都是 `子域.主域.顶级域` 的三段式；
- * 多段子域（a.b.c.com）会取 `c.com`，对本项目足够且更安全（不下发到太宽的域）。
- */
-private fun rawHost(host: String): String {
-    val parts = host.split('.')
-    return if (parts.size >= 2) parts.takeLast(2).joinToString(".") else host
-}
-
-/** epoch 毫秒 → HTTP 日期（`EEE, dd MMM yyyy HH:mm:ss z`，GMT）。 */
-private fun httpDate(epochMillis: Long): String =
-    java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US)
-        .apply { timeZone = java.util.TimeZone.getTimeZone("GMT") }
-        .format(java.util.Date(epochMillis))
-
-/**
- * HTTP 状态码 → reason phrase。
- *
- * `WebResourceResponse` 的三参构造（statusCode + reasonPhrase + headers）要求给非空短语，
- * 传空串会导致 WebView 侧解析异常（表现为资源加载失败）。
- */
-private fun statusPhrase(code: Int): String = when (code) {
-    200 -> "OK"
-    201 -> "Created"
-    204 -> "No Content"
-    301 -> "Moved Permanently"
-    302 -> "Found"
-    304 -> "Not Modified"
-    400 -> "Bad Request"
-    401 -> "Unauthorized"
-    403 -> "Forbidden"
-    404 -> "Not Found"
-    417 -> "Expectation Failed"
-    429 -> "Too Many Requests"
-    500 -> "Internal Server Error"
-    502 -> "Bad Gateway"
-    503 -> "Service Unavailable"
-    else -> "HTTP $code"
-}
-
-/**
- * 读取 WebView 请求体。
- *
- * `WebResourceRequest`（API 21）**不暴露请求体** —— 这是平台限制，无法绕过
- * （`requestHeaders` 只有头，没有内容）。故统一返回 null，
- * 由 [PkH5Proxy] 以空体发送。
- *
- * 当前无害：PK 首页与 `anti-addiction` 都是 **GET**（无 body）；
- * 若将来 H5 出现「原生代发的 POST/PUT」，需要改用
- * `shouldInterceptRequest` + `WebView.loadUrl(url, extraHeaders)` 之外的方案
- * （例如在 JS 侧改走 `dataEncrypt` 桥）。
- */
-@Suppress("UNUSED_PARAMETER")
-private fun readRequestBody(request: WebResourceRequest): ByteArray? = null
 
 /**
  * 拦截 `leo://` scheme。
  *
- * 原版 H5 通过这个 scheme 调原生能力，已知的有：
- *  - `leo://openWebView?url=...` —— 打开新 WebView
- *    （MT APK MCP 取证：`LeoPkAppWidgetProvider` 等类内含 `leo://openWebView?url=`）
- *  - `leo://close` —— 关闭当前容器
- *  - `leo://back` —— 退当前容器历史（对齐原生返回语义）
+ * 原版 H5 通过这个 scheme 调原生能力。在**内置 node 架构**下，
+ * 绝大多数已被 pk-node 的 JS 桥接管（它自己实现 `openWebView` / `closeWebView`），
+ * 宿主只需要处理「页面自己冒出来的 scheme」这一层兜底。
  *
- * 当前处理 `close` / `back`（都回退），其余记录日志后忽略。
- * 完整 scheme 表待从原版 smali 的 WebView 容器实现里挖出。
+ * 当前处理 `close` / `back` / `finish`（都回退）。其余放行给 WebView。
  *
- * @return true 表示已消费该 URL，WebView 不再加载它
+ * @return true 表示已消费该 URL
  */
 private fun handleScheme(url: String, onFinish: () -> Unit): Boolean {
     if (!url.startsWith("leo://")) return false
-    
+
     val uri = Uri.parse(url)
-    when (uri.host) {
+    return when (uri.host) {
         "close", "back", "finish" -> {
             onFinish()
-            return true
+            true
         }
-        "openWebView" -> {
-            // 原版会新开一个 WebView 加载 url 参数里的地址。
-            // 当前未实现多 WebView 栈，记录后让 WebView 自己处理（会失败，但不崩）。
-            return false
-        }
-        else -> {
-            return true
-        }
+        // openWebView / 其余自定义能力：交给 pk-node 的 JS 桥，宿主不拦
+        // （拦了反而会让 H5 的多 WebView 跳转失效）。
+        else -> false
     }
 }

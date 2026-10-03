@@ -26,7 +26,17 @@ import kotlinx.serialization.json.JsonElement
  */
 class PkViewModel : ViewModel() {
 
-    /** H5 入口 URL。构造即就绪，不为空。 */
+    /**
+     * H5 入口地址 —— **仅供展示/兜底**。
+     *
+     * ★ 2026-10-03 起 PK 页面换成了**内置 node 版**：真正的加载地址由
+     * [cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator.h5Url] 给出
+     * （`http://127.0.0.1:8792/pk-h5/pk.html?leoAccountId=<userid>`），
+     * 本字段不再参与加载（见 `PkH5Screen`）。
+     *
+     * 保留它是为了让 [entryData] 那套「PK 入口数据」的既有展示逻辑不炸，
+     * 也方便日志里对比「老 URL vs 新 URL」。
+     */
     var h5Url by mutableStateOf(PkRepository.pkH5Url())
         private set
 

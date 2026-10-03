@@ -125,9 +125,30 @@ android {
         compose = true
     }
 
+    /**
+     * ★★ 2026-10-03：内置 node 运行时的两个必需配置。
+     *
+     * ## jniLibs.useLegacyPackaging = true（= manifest 的 extractNativeLibs=true）
+     *
+     * Android 6+ 且 targetSdk ≥ 23 时，`.so` **默认不落盘**：
+     * 系统直接 mmap APK 里的未压缩条目，`nativeLibraryDir` 里**看不到文件**。
+     * 但我们要做的不是「dlopen 一个 .so」，而是**把 libnode.so 当可执行文件跑**
+     * （`type=application/octet-stream` 的 exec）—— 那必须是磁盘上的真实文件。
+     *
+     * 所以必须显式打开 legacy packaging，让 `.so` 在安装时解压到
+     * `/data/app/<pkg>/lib/arm64/`（该目录由系统挂载且**允许执行**，
+     * 这是 Android 10+ W^X 下唯一能 exec 的地方；App 自己的 filesDir 不行）。
+     *
+     * 代价：安装后占用空间翻倍（APK 内一份 + 解压一份），装机时间略增。
+     * 对我们这 120MB 的运行时来说可以接受 —— 换成别的方案（从 assets 解压到
+     * filesDir）会被 W^X 直接拒掉，根本跑不起来。
+     */
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 }

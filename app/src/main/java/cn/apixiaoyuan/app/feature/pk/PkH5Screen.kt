@@ -41,6 +41,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import cn.apixiaoyuan.app.core.design.icon.AppIcons
+import androidx.compose.foundation.background
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import cn.apixiaoyuan.app.core.design.component.isDarkColor
+import cn.apixiaoyuan.app.core.design.component.probeH5PageColor
+import cn.apixiaoyuan.app.core.design.component.rememberH5PageColor
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 import cn.apixiaoyuan.app.core.log.AppLogger
 import cn.apixiaoyuan.app.core.oldsimian.PkJsInjector
 import cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator
@@ -128,6 +136,16 @@ fun PkH5Screen(
         PkHostOrchestrator.startAsync(context)
         onDispose { }
     }
+
+    // ★ 2026-10-03：H5 页面底色（自适应填满状态栏那条带子）。
+    //
+    // App 开了 enableEdgeToEdge，状态栏是**浮在内容之上**的。本页的根 Column
+    // 原先没有背景 → 状态栏那条带子露出窗口底色，与 H5 页面颜色不一致（用户报
+    // 「顶部是空的、应该采取自适应页面颜色填充」）。
+    //
+    // 这里在 onPageFinished 里问页面「你的底色是什么」，拿到后铺满整页。
+    // 详见 core/design/component/H5PageColor.kt。
+    val pageColor = rememberH5PageColor()
 
     // WebView 实例在 composition 期间创建；销毁由 AndroidView 的 onRelease 负责。
     val webView = remember {
@@ -237,6 +255,8 @@ fun PkH5Screen(
                     // 「老挂戏老叟」的注入（去动画 / 自动下一局 / 自动画笔 / **JS 控制台**）。
                     // 前三个依赖 Vue 树（与宿主实现无关），控制台是 Eruda。
                     view?.let { PkJsInjector.injectIfEnabled(it) }
+                    // 每次都探：SPA 内部导航会换「页面」，底色未必相同。
+                    view?.let { probeH5PageColor(it, pageColor, tag = "PkH5") }
                 }
 
                 override fun onReceivedError(
@@ -334,7 +354,27 @@ fun PkH5Screen(
     val hostState = PkHostOrchestrator.state
     val targetUrl = PkHostOrchestrator.h5Url()
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // 底色：探测到就紧跟 H5；没探到则退回主题色（不猜）。
+    val bg = pageColor.value ?: MiuixTheme.colorScheme.surfaceContainer
+
+    // 状态栏图标：底色深 → 用浅色图标（否则时间/电量看不见）。
+    // 必须在探测到颜色后跟着变，所以放在这里（而不是 remember 一次）。
+    val view = LocalView.current
+    LaunchedEffect(bg) {
+        runCatching {
+            val act = view.context as? android.app.Activity ?: return@runCatching
+            WindowCompat.getInsetsController(act.window, view)
+                .isAppearanceLightStatusBars = !isDarkColor(bg)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            // ★ 铺满整页：状态栏那条带子（edge-to-edge 下露出的是窗口底色）
+            //   会与 H5 页面完全同色。
+            .background(bg),
+    ) {
 
         // 顶部进度条：只在**首次加载**显示（SPA 内部导航不显示，否则一闪一闪）
         if (viewModel.webProgress in 1..99 && loadedTarget == null) {

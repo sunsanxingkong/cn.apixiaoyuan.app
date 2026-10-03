@@ -12,6 +12,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -39,7 +41,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import cn.apixiaoyuan.app.core.design.component.isDarkColor
+import cn.apixiaoyuan.app.core.design.component.probeH5PageColor
+import cn.apixiaoyuan.app.core.design.component.rememberH5PageColor
 import cn.apixiaoyuan.app.core.design.icon.AppIcons
 import cn.apixiaoyuan.app.core.log.AppLogger
 import cn.apixiaoyuan.app.core.navigation.AppNavController
@@ -104,6 +111,11 @@ fun PkNodeScreen(navController: AppNavController) {
     val baseUrl = "http://127.0.0.1:${NodeRuntime.DEFAULT_PORT}/"
     val ready = hostState is PkHostOrchestrator.State.Ready
 
+    // ★ 2026-10-03：与管理后台同样的「自适应页面底色」处理。
+    //   管理后台是跟随 App 主题的网页（可能白底也可能黑底），
+    //   所以同样不能写死颜色。详见 core/design/component/H5PageColor.kt。
+    val pageColor = rememberH5PageColor()
+
     val webView = remember {
         WebView(context).apply {
             // 与 PK 容器同样的焦点纪律：WebView 天生可聚焦，持有焦点会在
@@ -128,6 +140,8 @@ fun PkNodeScreen(navController: AppNavController) {
                     progress = 100
                     view?.title?.takeIf { it.isNotBlank() }?.let { title = it }
                     AppLogger.i("PkNodeWeb", "onPageFinished: $url")
+                    // 问页面要底色（每次都探：SPA 内部导航会换页面）
+                    view?.let { probeH5PageColor(it, pageColor, tag = "PkNodeWeb") }
                 }
 
                 override fun onReceivedError(
@@ -181,7 +195,25 @@ fun PkNodeScreen(navController: AppNavController) {
         if (webView.canGoBack()) webView.goBack() else navController.popBackStack()
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // 底色：探测到就紧跟网页；没探到则退回主题色（不猜）。
+    val bg = pageColor.value ?: MiuixTheme.colorScheme.surfaceContainer
+
+    // 状态栏图标跟着底色走（底色深 → 浅色图标）。
+    val view = LocalView.current
+    LaunchedEffect(bg) {
+        runCatching {
+            val act = view.context as? android.app.Activity ?: return@runCatching
+            WindowCompat.getInsetsController(act.window, view)
+                .isAppearanceLightStatusBars = !isDarkColor(bg)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            // ★ 铺满：edge-to-edge 下状态栏那条带子用页面同色，不再留白。
+            .background(bg),
+    ) {
         if (progress in 1..99 && loadedTarget == null) {
             LinearProgressIndicator(
                 progress = { progress / 100f },

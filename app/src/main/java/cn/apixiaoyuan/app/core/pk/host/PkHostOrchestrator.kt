@@ -171,6 +171,11 @@ object PkHostOrchestrator {
             started = false
             startedBlocking = false
         }
+        // ★ 强制重推：把「上次推过去的身份」清掉，让 startBlocking 里的
+        //   「身份不一致才推」判定必然为真。
+        //   不加这句会出现死角：切号后 `want` 与 `syncedYfdU` 的比较依赖时序，
+        //   万一这中间又被别处写过，就会「切了但没推」。
+        syncedYfdU = 0
         AppLogger.i(TAG, "切号后重跑联动（App 身份 → pk-node）")
         startAsync(ctx)
         return true
@@ -272,7 +277,13 @@ object PkHostOrchestrator {
         //
         // ⚠️ `primary` 既用来**取主键**（拼 leoAccountId，见下）也用来**灌 cookie**，
         //    两者用的字段不同：前者要 `id`，后者要 `cookieHeader`。别混。
-        val primary = hs.primary
+        // ★ 2026-10-03：按 **App 当前身份**优先挑主账号（修「切号不成功」）。
+        //   不能只取「第一个有 yfdU 的」—— 那在 pk-node 库里存在多条账号时，
+        //   会拿到**切换前那条**，然后被 applyAccountToSession 灌回 App，
+        //   把用户刚切好的身份改回去。详见 Handshake.primaryFor 与
+        //   applyAccountToSession 的 KDoc。
+        val appYfdU = currentYfdU().takeIf { it > 0L }
+        val primary = hs.primaryFor(appYfdU)
         val linked = applyAccountToSession(primary)
 
         AppLogger.i(
@@ -333,6 +344,31 @@ object PkHostOrchestrator {
     private fun applyAccountToSession(primary: PkNodeLink.Account?): Boolean {
         val target = primary?.yfdU ?: return false
         if (target <= 0L) return false
+
+        // ★★ 2026-10-03 修「账号切换不成功」（我自己引入的回归）：
+        //
+        // ## 症状与链路
+        //
+        // 切号 → [relinkAsync] → 把新身份推给 pk-node。但 pk-node 的导入是
+        // **按 yfd_u upsert**，切到**另一个**子账号时 yfd_u 变了 → 库里**新增**一条，
+        // 旧的**不会消失**。而 `Handshake.primary` 取的是「**第一个**有 yfdU 的账号」
+        // —— 也就是最早那条 = **切换前的那个**。
+        //
+        // 于是这里会把**旧 cookie 灌回 App**，把用户刚切好的身份**改回去**
+        // （[SessionStore.saveYfdU] 一写，身份就回到旧的）→ 表现就是「切号不成功」。
+        //
+        // ## 原则：App 是「谁是当前身份」的权威
+        //
+        // pk-node 应该**跟随** App，不是反过来。所以两者不一致时**不导入**。
+        // （`[relinkAsync]` 已经把 App 的新身份推过去了，下一轮 handshake 就会一致。）
+        val appYfdU = runCatching { SessionStore.yfdU }.getOrNull() ?: 0L
+        if (appYfdU > 0L && appYfdU != target) {
+            AppLogger.i(
+                TAG,
+                "跳过导入 pk-node 主账号 $target：与 App 当前身份 $appYfdU 不一致（以 App 为准）",
+            )
+            return false
+        }
         if (primary.cookieHeader.isBlank()) {
             AppLogger.w(TAG, "pk-node 账号 ${primary.id} 没有 cookie，跳过导入")
             return false

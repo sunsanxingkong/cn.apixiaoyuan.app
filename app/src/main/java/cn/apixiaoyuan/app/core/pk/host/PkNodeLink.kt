@@ -92,14 +92,27 @@ object PkNodeLink {
         val h5Base: String?,
         val accounts: List<Account>,
     ) {
-        /**
-         * 第一个「有 yfdU」的账号 —— 即「主账号」。
+/** 第一个「有 yfdU」的账号 —— 即「主账号」。
          *
          * 用途：① 灌 App 登录态（用它的 [Account.cookieHeader]）；
          *      ② 拼 H5 的 `leoAccountId`（用它的 [Account.id]，**不是** yfdU）。
+         *
+         * ⚠️ **优先取与 App 当前身份一致的那条**（2026-10-03 修「切号不成功」）。
+         *
+         * pk-node 的账号是**按 yfd_u upsert** 的，切到**另一个**子账号时库里会
+         * 多出一条、旧的不会消失；单看「第一个」会拿到**切换前那条**，
+         * 于是「灌回 App」就把切号改回去了（详见 `PkHostOrchestrator` 里
+         * `applyAccountToSession` 的说明）。
+         *
+         * 所以这里按 [appYfdU] 优先挑：命中就返回它，没有才退回「第一个」。
          */
-        val primary: Account?
-            get() = accounts.firstOrNull { (it.yfdU ?: 0L) > 0L }
+        fun primaryFor(appYfdU: Long?): Account? {
+            val want = appYfdU ?: 0L
+            if (want > 0L) {
+                accounts.firstOrNull { it.yfdU == want }?.let { return it }
+            }
+            return accounts.firstOrNull { (it.yfdU ?: 0L) > 0L }
+        }
     }
 
     /**

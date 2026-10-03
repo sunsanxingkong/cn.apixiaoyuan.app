@@ -46,6 +46,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import cn.apixiaoyuan.app.core.design.theme.PageTransitionAnimation
+import cn.apixiaoyuan.app.core.design.theme.PageTransitionPrefs
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -373,7 +377,7 @@ fun PkH5Screen(
 
     // ---- 系统返回键：先退 H5 历史，退无可退才关容器 ----
     BackHandler(enabled = true) {
-        goBackOrFinish(webView, onFinish)
+        goBackOrFinish(webView, onFinish, navAnim)
     }
 
     val hostState = PkHostOrchestrator.state
@@ -392,6 +396,20 @@ fun PkH5Screen(
                 .isAppearanceLightStatusBars = !isDarkColor(bg)
         }
     }
+
+    val animPref = PageTransitionPrefs.animation
+    // ★ 原生转场的两个输入：屏幕宽（miuix 用整屏宽、aosp 用 96dp）与密度。
+    val density = LocalDensity.current.density
+    val screenW = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
+    val spec = remember(animPref, screenW, density) { navAnimSpecOf(animPref, screenW, density) }
+    // 进度 → 位移/透明度（帧时钟驱动；不用自己起协程，也不会被重组打断）。
+    val t by animateFloatAsState(
+        targetValue = navAnim.progress,
+        animationSpec = tween(durationMillis = spec.durationMs),
+        label = "pk-h5-nav",
+    )
+    val enterPx = screenW * spec.enterFraction
+    val coverPx = screenW * spec.coverFraction
 
     Column(
         modifier = Modifier
@@ -436,7 +454,22 @@ fun PkH5Screen(
         Box(modifier = Modifier.weight(1f)) {
             AndroidView(
                 factory = { webView },
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    // ★ 原生切页转场（进入方向）：**整体动 WebView 自己**。
+                    //
+                    // 用户要求「切换 h5 要用 miuix 或 aosp 的原生动画，并且**只在 app 中
+                    // 使用网页没有动画**」—— 这里就是那个「只在 App 侧」的位移：
+                    // 动的是 AndroidView 这个 View 的 `graphicsLayer`，
+                    // **不动 WebView 内部、不动网页**。
+                    //
+                    // ⚠️ 我上一版写成了一个空 Box（什么都不动）—— 那时「太僵硬」的原因之一。
+                    .graphicsLayer {
+                        if (navAnim.visible && navAnim.entering) {
+                            translationX = (1f - t) * enterPx
+                            alpha = t.coerceIn(0f, 1f)
+                        }
+                    },
                 update = { view ->
                     // 注意：这里**没有** cookie 同步 —— 见本文件 KDoc 的「③」。
                     // 也没有无条件 loadUrl（那会造成 SPA 反复重载）。
@@ -453,35 +486,23 @@ fun PkH5Screen(
                 onRelease = { view -> releaseWebView(view) },
             )
 
-// ---- ★ H5 内部切页的「画面移交」覆盖层 ----
+// ---- ★ H5 内部切页的**原生转场**（② 被覆盖层）----
             //
-            // 为什么需要它：H5 跳下一页时浏览器会把旧画面**清空**（= 白屏），
-            // 而新页面要等网络 + 渲染才有东西。这段空窗期就是用户看到的「白闪」。
+            // ①（**新页滑入**）动的是上面 `AndroidView` 的 `graphicsLayer` ——
+            //   因为它要动的是 WebView 这个 View 自己（空 Box 是没用的）。
             //
-            // 这里用 **H5 自己的底色 `bg`** 铺满（不是刺眼的白），并让整块画面
-            // 从右侧滑入 + 淡入，时长/缓动与 app 二级页转场（miuix, 260ms）对齐 ——
-            // 观感上就是「进入下一个 h5 页面也有切页动画」。
-            //
-            // ⚠️ 动画本身交给 Compose 的 [animateFloatAsState]：
-            //    holder 只负责「什么时候开始（progress=0）/ 结束（progress=1）」，
-            //    插值曲线由这里声明 —— 这样动画由 Compose 的帧时钟驱动，
-            //    不需要自己起协程，也不会因为重组被打断。
-            //
-            // ⚠️ 局限（如实说明）：拿不到旧页面的画面快照，所以只有「新页滑入」，
-            //    没有「旧页滑出」那半边。
-            val navAnimProgress by animateFloatAsState(
-                targetValue = navAnim.progress,
-                animationSpec = tween(durationMillis = 260),
-                label = "pk-h5-nav",
-            )
-            if (navAnim.visible) {
+            // ②（**被覆盖层**）就是这里：返回/退页时，应该看到「旧页滑回来盖住当前页」。
+            //   但**拿不到旧 H5 的画面快照**（WebView 在 onPageStarted 时已清空旧内容），
+            //   所以用 H5 自己的底色 [bg] 代替。
+            //   miuix 带 0.25 宽视差并降到 0.9 不透明；aosp 是「轻推」，不视差。
+            if (navAnim.visible && !navAnim.entering) {
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .matchParentSize()
                         .graphicsLayer {
-                            // 从右侧 12% 处滑入（不是整屏宽 —— 整屏滑入在手机上太「重」）
-                            translationX = (1f - navAnimProgress) * (size.width * 0.12f)
-                            alpha = navAnimProgress.coerceIn(0f, 1f)
+                            translationX = (1f - t) * -coverPx
+                            alpha = ((1f - t) * (1f - spec.coverAlpha) + spec.coverAlpha)
+                                .coerceIn(0f, 1f)
                         }
                         .background(bg),
                 )
@@ -607,13 +628,18 @@ private fun HostNotice(
  * H5 的 hash 路由导航（SPA 的 `#/xxx`）会被 Chromium 记进 navigation
  * controller，所以 `canGoBack()` 同样覆盖 SPA 内部的前进后退。
  */
-private fun goBackOrFinish(webView: WebView, onFinish: () -> Unit) {
+private fun goBackOrFinish(webView: WebView, onFinish: () -> Unit, navAnim: NavAnimHolder?) {
     if (webView.canGoBack()) {
         // H5 内部还有历史：退一级，**不退容器**。
+        //
+        // ★ 2026-10-03：先铺「返回方向」的原生转场（用户要求「切换 h5 要用 miuix 或
+        //   aosp 的原生动画」）。必须**在 `goBack()` 之前**铺 —— 因为退页后旧页才被恢复，
+        //   而我们要在它恢复之前先把「被覆盖层」放上去，否则中间会先白闪一下。
         //
         // ⚠️ 这里**刻意不清焦点** —— 用户可能正在某个 `<input>` 里打字，
         //    退一级不等于要收起输入法（浏览器也是这个行为）。
         //    清焦点只在「真的要离开容器」时做（见下面的 else）。
+        runCatching { navAnim?.onBackNav() }
         webView.goBack()
     } else {
         // H5 首页再返回 = 关容器。★ 必须**先 clearFocus 再 onFinish**：
@@ -685,50 +711,81 @@ private fun handleScheme(url: String, onFinish: () -> Unit): Boolean {
 }
 
 /**
- * H5 内部跳转的「画面移交」动画状态（★ 2026-10-03）。
+ * H5 内部跳转的**原生切页转场**（★ 2026-10-03，同日按用户反馈重做第二版）。
  *
- * # 为什么需要它（用户在要求什么）
+ * # 用户要求（逐字）
  *
- * > 「进入下一个 h5 页面应该也有切页动画（有预测性返回）」
+ * > 「切换 h5 要用 miuix 或 aosp 的原生动画并且**只在 app 中使用网页没有动画**，
+ * >   之前写的那个**太僵硬了**」
  *
- * app 级的二级页转场（`AppNavTransition` / `NavTransitions.MiuixDefault`）**管不到
- * H5 内部跳转** —— 因为始终是同一个 WebView、同一条路由，跳转是 pk-node 在页面里
- * 执行 `location.href = <本地化后的 url>`（浏览器式硬跳，没有转场）。
+ * 两点都照做：
+ *  1. **只在 App 侧动**：网页（WebView）**完全不动画**。转场由 App 这里合成的两层
+ *     图形层完成 —— 所以这里的 `translationX` / `alpha` 都是 `graphicsLayer` 参数，
+ *     **绝不**去改 WebView 自身或调用网页 JS。
+ *  2. **对齐 App 已有的两套原生转场**（跟随 «设置 → 过渡动画»）：
+ *     - `MIUIX` → 整屏滑 + 被覆盖页 0.25 宽视差 + 轻微淡出
+ *       （对齐 `NavTransitions.MiuixDefault`）
+ *     - `AOSP` → **96dp 横向漂移**（不是整屏滑）+ 450ms `FastOutExtraSlowIn`
+ *       （对齐 `AppNavTransition.ClassicActivityOpen/Close`）
+ *
+ * 第一版为什么「僵硬」：我用了「只滑 12% 宽度 + 260ms tween」，
+ * 既不整屏滑（不像 miuix），也不是 96dp 漂移（不像 aosp），
+ * 而且**没有视差** —— 被覆盖页一动不动，像一块板子平移。
+ *
+ * # 为什么需要它
+ *
+ * app 级二级页转场管不到 H5 内部跳转：始终是同一个 WebView、同一条路由，
+ * 跳转是 pk-node 在页面里 `location.href = …`（浏览器式硬跳）。
  *
  * # 为什么状态要放在对象里（踩过的坑）
  *
- * 第一次实现时我把 `mutableStateOf` 直接写成 `PkH5Screen` 的局部变量，
- * 结果编译报一串 `Unresolved reference`。原因：
- *
- * **WebView 是在 `remember { WebView(context).apply { ... } }` 里创建的**，
- * 而 `remember` 的那个 lambda **不是 `@Composable` 作用域** —— 它里面引用不到
- * 外层 composable 的局部变量（`pageAnim` / `animScope` / `lastMainUrl` 全都拿不到）。
- *
- * 解法：把状态封进一个普通 class 实例，用 `remember { NavAnimHolder() }` 创建；
- * 内部用 `mutableFloatStateOf` 持有 Compose 状态。这样 WebViewClient 回调里
- * （通过闭包捕获 holder）和 composable 里（直接读 holder）都能访问。
+ * WebView 是在 `remember { WebView(...).apply { ... } }` 里创建的，
+ * 那个 lambda **不是 `@Composable` 作用域**，引用不到 composable 局部状态
+ * （第一次写就撞了 `Unresolved reference`）。所以状态封进这个类，
+ * 用 `remember { NavAnimHolder() }` 创建；WebViewClient 回调与 composable 两边都能读。
  *
  * # 什么时候播 / 不播
  *
  * 只在**主文档导航**（`pk.html` → `external.html` / 荣誉榜页 …）时播。
- * pk.html 内部的换页走 **hash 路由**（`#/xxx`）—— 那不算「进入下一个页面」，
- * 给它也播会变成「点任何东西都闪一下」。
- * 判据是 [isMainNav]：比较**路径（去 query 去 hash）+ host**，任一不同才算切页。
+ * pk.html 内部的换页走 **hash 路由**（`#/xxx`）—— 不是「进入下一个页面」，
+ * 给它也播会变成「点任何东西都闪一下」。判据见 [isMainNav]。
  *
  * # 局限（如实说明）
  *
- * 拿不到旧页面的画面快照，所以只有「新页从右侧滑入 + 淡入」，
- * 没有「旧页滑出」那半边 —— 观感是「底色 → 新页」，而不是完整的双向转场。
- * 真要做双向，得靠 WebView 绘制快照（`onDraw` 抓 bitmap）或改用
- * `ViewPager` 式的双 WebView，成本与风险都高得多。
+ * 拿不到**被覆盖页（旧 H5）**的画面快照 —— WebView 在 `onPageStarted` 时已经把
+ * 旧内容清空了。所以“两层”里：
+ *  - 进场层 = **新的 H5 画面**（真实内容，会真的滑入）；
+ *  - 被覆盖层 = 收尾那次用的**底色层**（旧页面已经没了，只能用底色代替）。
+ * 因此**视差只出现在收尾（返回/退页）那一次**；进场时看不到旧页视差。
+ * 真要做到进场也有视差，需要 WebView 绘制快照（`onDraw` 抓 bitmap）或双 WebView，
+ * 成本与风险都高得多。
  */
 private class NavAnimHolder {
 
-    /** 动画进度：0 = 刚开始（画面在右侧、透明），1 = 结束（归位、不透明）。 */
+    /**
+     * 转场进行到哪一步，0 → 1。
+     *
+     * 含义按 [entering] 分：
+     *  - [entering] = true（进入下级页）：0 = 新页在屏幕外，1 = 新页归位；
+     *  - [entering] = false（返回上级页）：0 = 底色层在屏幕外，1 = 底色层归位。
+     */
     var progress by mutableFloatStateOf(1f)
         private set
 
-    /** 是否正在播放（false 时不渲染覆盖层，避免常态多一层 Box）。 */
+    /**
+     * 本次是「进入下级页」还是「返回上级页」。
+     *
+     * 为什么要分：两者**该看到什么**不一样 ——
+     *  - 进入：应该看到**新页滑进来**，所以动画目标是让新页归位；
+     *  - 返回：应该看到**旧页（这里用底色代替）滑回来**，盖住正在退出的当前页。
+     *
+     * 第一版没分这两种，所以返回时也是「新页从右滑入」，方向反了 —— 那也
+     * 是「僵硬」的来源之一。
+     */
+    var entering by mutableStateOf(true)
+        private set
+
+    /** 是否正在播放（false 时两个图形层都不渲染，避免常态多两层）。 */
     var visible by mutableStateOf(false)
         private set
 
@@ -738,21 +795,35 @@ private class NavAnimHolder {
     /**
      * 在 `onPageStarted` 调用。
      *
-     * 此时浏览器**已经把旧画面清空**（所以那一瞬是白屏）—— 正是铺移交层的最佳时机。
+     * 此时浏览器**已经把旧画面清空**（所以那一瞬是白屏）—— 正是铺转场层的最佳时机。
      */
     fun onMainNav(url: String?) {
         if (url.isNullOrBlank()) return
-        val first = lastUrl == null
-        val changed = isMainNav(lastUrl, url)
+        val prev = lastUrl
+        val first = prev == null
+        val changed = isMainNav(prev, url)
         lastUrl = url
         // 首次加载不播：那时还在「启动内置服务」的覆盖层里，播了也看不到，
         // 反而会在启动完成那一刻多闪一次。
         if (first || !changed) return
         visible = true
+        entering = true
         progress = 0f
     }
 
-    /** 在 `onPageFinished` 调用：新文档就绪，撤掉移交层。 */
+    /**
+     * 在返回/退页**之前**调用（[goBackOrFinish] 走 `webView.goBack()` 那条路）。
+     *
+     * 返回方向的转场需要**提前**铺层：真正 `goBack()` 之后旧页才被恢复，
+     * 而我们要在它恢复之前先把底色层放上去，否则中间会先白闪一下。
+     */
+    fun onBackNav() {
+        visible = true
+        entering = false
+        progress = 0f
+    }
+
+    /** 在 `onPageFinished` 调用：新文档就绪，撤掉转场层。 */
     fun finish() {
         visible = false
         progress = 1f
@@ -761,10 +832,10 @@ private class NavAnimHolder {
     /**
      * 是否是「进入另一个文档」（而不是同文档的 hash / query 变化）。
      *
-     * 例：
-     *  - `pk.html#/a` → `pk.html#/b`      ：同文档，**不算**（SPA 换页）
-     *  - `pk.html` → `exercise.html?…`    ：**算**
-     *  - 换 host（`xyks...` → 本机）       ：**算**
+     * 例（2026-10-03 实测过的真实形态）：
+     *  - `pk.html#/a` → `pk.html#/b`                    ：同文档，**不算**（SPA 换页）
+     *  - `pk.html` → `pk-h5-cdn/leo-web-study-group/…`   ：**算**（荣誉榜 / 下级页）
+     *  - `pk.html` → `exercise.html?pointId=42&…`        ：**算**
      */
     private fun isMainNav(prev: String?, next: String): Boolean {
         if (prev.isNullOrBlank()) return false
@@ -776,3 +847,50 @@ private class NavAnimHolder {
     private fun hostOf(u: String) =
         runCatching { java.net.URI(u).host ?: "" }.getOrDefault("")
 }
+
+/**
+ * 一个「原生转场」的观感参数（把 [PageTransitionAnimation] 的两套换算成数值）。
+ *
+ * 数值全部对齐 App 已有的转场实现，**不是**自己拍脑袋定的：
+ *
+ * | | MIUIX | AOSP |
+ * |---|---|---|
+ * | 进场位移 | **整屏宽**（`layoutSize.width`） | **96dp** |
+ * | 时长 | 450ms | 450ms |
+ * | 被覆盖层视差 | 0.25 宽 + alpha→0.9 | 0 宽（AOSP 是「轻推」，不做视差） |
+ *
+ * miuix 侧依据 `NavTransitions.MiuixDefault`：
+ * `translationX = -d * width`（整屏滑），被覆盖页 `-1 * coverProgress * width * 0.25f`
+ * 且 `alpha = 1 - 0.1 * coverProgress`。
+ * aosp 侧依据 `AppNavTransition.CrossActivityDrift = 96.dp` 与
+ * `ClassicActivityMotion = Tween(450, FastOutExtraSlowIn)`。
+ */
+private class NavAnimSpec(
+    /** 进场页滑入距离（占屏宽的比例；AOSP 是 96dp，调用时再换算成比例）。 */
+    val enterFraction: Float,
+    /** 被覆盖页（底色层）的视差距离（占屏宽比例）。 */
+    val coverFraction: Float,
+    /** 被覆盖页的最终不透明度（miuix 是 0.9，aosp 保持 1）。 */
+    val coverAlpha: Float,
+    /** 时长（毫秒）。 */
+    val durationMs: Int,
+)
+
+/** 取当前设置对应的转场参数（跟随 «设置 → 过渡动画»）。 */
+private fun navAnimSpecOf(anim: PageTransitionAnimation, widthPx: Float, density: Float): NavAnimSpec =
+    when (anim) {
+        // miuix：整屏滑 + 被覆盖页 0.25 宽视差、轻微淡出
+        PageTransitionAnimation.MIUIX -> NavAnimSpec(
+            enterFraction = 1f,
+            coverFraction = 0.25f,
+            coverAlpha = 0.9f,
+            durationMs = 450,
+        )
+        // aosp：96dp 横向漂移（不是整屏滑），被覆盖页不视差
+        PageTransitionAnimation.AOSP -> NavAnimSpec(
+            enterFraction = (96f * density) / widthPx.coerceAtLeast(1f),
+            coverFraction = 0f,
+            coverAlpha = 1f,
+            durationMs = 450,
+        )
+    }

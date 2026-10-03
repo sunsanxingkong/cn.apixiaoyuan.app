@@ -10,10 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,8 +23,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.design.component.AppScrollScaffold
-import cn.apixiaoyuan.app.core.navigation.RoutePkGrind
-import cn.apixiaoyuan.app.core.navigation.RouteScorePump
+// ★ 2026-10-03 删除 RoutePkGrind / RouteScorePump 两个 import：
+//   对应入口（「刷 PK 对局」「打开刷分页」）已从本页移除，留着会有 unused import 警告。
 import cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -37,11 +35,24 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 「老挂戏老叟」功能页（设置 → 老挂戏老叟）。
+ * 「这个开关还没接上」的统一后缀（2026-10-03）。
+ *
+ * PK 页换成内置 node 版后，三个注入 H5 的脚本（`pk_auto_next.js` /
+ * `pk_no_anim.js` / `pk_auto_stroke.js`）是照**旧容器**写的，
+ * **尚未在新架构上实现**。开关置灰并在副标题上标出来 ——
+ * 让用户明确知道「还没做」，而不是以为坏了。
+ *
+ * ⚠️ 置灰只动 UI（`enabled = false`）：`OldSimianPrefs` 与 `PkJsInjector`
+ * 都没改，所以**已经开着的人行为不变**，且实现后去掉 `enabled = false` 即可。
+ */
+private const val NOT_WIRED_NOTE = "（PK H5 功能尚未接入，暂不可用）"
+
+/**
+ * 「老挂戏老叟」功能页（**底部「功能」tab 的根页**，见 `MainActivity` 的 pager）。
  *
  * ## 页面纪律
  *
- * **页面完全用本项目自己的 UI 搭建**（[AppScaffold] 顶栏 + miuix 组件），
+ * **页面完全用本项目自己的 UI 搭建**（[AppScrollScaffold] 顶栏 + miuix 组件），
  * 不复用 cn.nizou.sxd 的 `MainPagerScreen` / `CustomScoreScreen` 等任何页面 ——
  * 这是用户明确要求的：「页面就不要用老挂戏老叟的了」。
  *
@@ -60,25 +71,31 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  *
  * 所以**没有任何一行 hook 代码**，功能靠内置链路原生实现。
  *
- * ## 已接入（本轮）
+ * ## ★ 2026-10-03 本页的大幅删减（用户要求，全部只在 ui 层）
  *
- * 1. 自动全部答对 —— 提交时用服务端下发的正确答案作答
- * 2. 自定义答案 —— 提交的 `userAnswer` 固定为指定值
- * 3. 提交画笔 —— 每题按实际作答生成笔迹 `script`（N 题 → N 条笔迹）
- * 4. 自定义结算时间 —— 每题 `costTime` 固定为配置值（下限 5ms）
- * 5. 结束页自动化 —— PK 结算页自动开下一局（注入 JS）
- * 6. 去除排行榜展示动效 —— CSS 动画归零 + 静音（注入 JS）
- * 7. **PK 自动提交画笔** —— 题目页自动注入笔迹并触发画板提交
- *    （注入 `js/pk_auto_stroke.js`，遍历 Vue 组件树找活体画板）
- * 8. 自定义分数（刷分）—— 走 `PUT /leo-math/android/exams/v2/{examId}`
- *    （`uploadExamResult`，练习成绩上传主接口），循环「取卷 → 全对填充 → 上传」
- *    直到 `curWeekScore ≥ 目标`。算法在 [cn.apixiaoyuan.app.core.oldsimian.ScorePump]，
- *    状态机在 `ScorePumpViewModel`，参数页是本文件顶部的「打开刷分页」入口。
+ * 用户原话：「把功能页没有实际作用以及后台接口的功能删掉（只在 ui 层）」
+ * → 「练习的功能可以直接把 ui 删了，注意都是功能 tab 页的元素不要删错了」
+ * → 「还有其他关于 pk h5 页面的功能还没写先把开关设为不可动」。
  *
- *    **此前的描述是错的**（已订正）：旧注释写「走
- *    `POST /leo-star/android/exercise/rank/login/attend`」—— 那是参考项目
- *    `postSavedExp` 的实际落点，**服务端限次（真机实测每天约 3 次）**，
- *    根本不是刷分该走的接口。
+ * | 段 | 处理 | 依据 |
+ * |---|---|---|
+ * | 练习（5 项） | **整段删 UI** | 用户明确要求；底层 `ExamViewModel` / `OldSimianPrefs` 未动 |
+ * | PK · 刷 PK 对局入口 | **删** | 与刷分区「PK 刷对局」是**同一个** `RoutePkGrind`，纯重复 |
+ * | PK · 结束页自动化 | **置灰** | 注入 `pk_auto_next.js`，新架构未实现 |
+ * | PK · 去除排行榜动效 | **置灰** | 注入 `pk_no_anim.js`，新架构未实现 |
+ * | PK · 自动提交画笔 | **置灰** | 注入 `pk_auto_stroke.js`，新架构未实现 |
+ * | PK · 显示刷轮数悬浮入口 | 保留 | 原生按钮，不经 H5，工作正常 |
+ * | H5 调试 · Eruda | 保留 | 用户明确要求保留 JS 控制台 |
+ * | 分数（2 项） | **整段删 UI** | 与刷分区同源（同一 pref、同一 `RouteScorePump`） |
+ *
+ * 保留的开关（真实接入、不可删）：
+ *  - 显示刷轮数悬浮入口 → `PkScreen` 渲染原生按钮；
+ *  - Eruda 调试台 → `PkJsInjector` 注入 `assets/js/eruda.js`。
+ *
+ * 已删但**仍在底层生效**的（供将来决定是否彻底移除）：
+ *  - `autoCorrect` / `customAnswerEnabled` / `customAnswerText` / `strokeEnabled` /
+ *    `customCostEnabled` / `customCostMs` → `ExamViewModel.buildSubmitBody()` 仍读；
+ *  - `customScoreEnabled` → 刷分区仍可改，`ScorePumpViewModel.start()` 会判。
  *
  * ## 「无视名字限制」**已接入**（2026-09-28 更正）
  *
@@ -87,7 +104,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  *  - 开关 UI：`feature/account/AccountScreen.kt`（「无视名字限制」卡片）；
  *  - 生效逻辑：`AccountViewModel.rename()` 读
  *    `OldSimianPrefs.ignoreNicknameRestriction` —— 打开即跳过客户端全部昵称校验
- *    （长度/字符/敏感词），原样提交给服务端；关闭时本地限制 16 字符。
+ *    （长度/字符/敏感词），原样提交给服务端。
  *
  * 故本页**删除了那行死开关**（避免「显示未接入但实际已接入」的误导），
  * 需要开关请到账号页。
@@ -106,78 +123,43 @@ fun OldSimianScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // ==================== 练习 ====================
-            SectionCard(title = "练习") {
-                SwitchRow(
-                    title = "自动全部答对",
-                    summary = "提交时用服务端下发的正确答案作答，整卷全对",
-                    checked = OldSimianPrefs.autoCorrect,
-                    onCheckedChange = {
-                        OldSimianPrefs.autoCorrect = it
-                        OldSimianPrefs.persist()
-                    },
-                )
-                SwitchRow(
-                    title = "自定义答案",
-                    summary = "提交的作答固定为下方内容；判对错仍按是否等于正确答案",
-                    checked = OldSimianPrefs.customAnswerEnabled,
-                    onCheckedChange = {
-                        OldSimianPrefs.customAnswerEnabled = it
-                        OldSimianPrefs.persist()
-                    },
-                )
-                if (OldSimianPrefs.customAnswerEnabled) {
-                    AnswerFieldRow(
-                        value = OldSimianPrefs.customAnswerText,
-                        onValueChange = {
-                            OldSimianPrefs.customAnswerText = it
-                            OldSimianPrefs.persist()
-                        },
-                    )
-                }
-                SwitchRow(
-                    title = "提交画笔",
-                    summary = "按题目数量提交等量笔迹（N 道题生成 N 条 script）",
-                    checked = OldSimianPrefs.strokeEnabled,
-                    onCheckedChange = {
-                        OldSimianPrefs.strokeEnabled = it
-                        OldSimianPrefs.persist()
-                    },
-                )
-                SwitchRow(
-                    title = "自定义结算时间",
-                    summary = "每题耗时固定为下方数值（下限 5ms）",
-                    checked = OldSimianPrefs.customCostEnabled,
-                    onCheckedChange = {
-                        OldSimianPrefs.customCostEnabled = it
-                        OldSimianPrefs.persist()
-                    },
-                )
-                if (OldSimianPrefs.customCostEnabled) {
-                    // 用输入框而不是 Slider：范围 5..10000 跨度太大，
-                    // 线性滑条每像素约 30ms，根本够不到 5ms 这种精确值。
-                    CostFieldRow(
-                        title = "每题耗时",
-                        value = OldSimianPrefs.customCostMs,
-                        range = OldSimianPrefs.COST_RANGE_MIN..OldSimianPrefs.COST_RANGE_MAX,
-                        unit = " ms",
-                        onCommit = {
-                            OldSimianPrefs.customCostMs = it
-                            OldSimianPrefs.persist()
-                        },
-                    )
-                }
-            }
+            //
+            // ★ 2026-10-03 按用户要求**整段删除**（原 5 项：自动全部答对 / 自定义答案 +
+            //   答案输入框 / 提交画笔 / 自定义结算时间 + 每题耗时输入框）。
+            //
+            // 用户原话：「练习的功能可以直接把 ui 删了，注意都是功能 tab 页的元素不要删错了」。
+            //
+            // ⚠️ **只删 UI**，底层一个都没动：
+            //   · `OldSimianPrefs` 里那 5 个字段与 `persist()/init()` 照旧保留 ——
+            //     它们还会被 `ConfigTransfer`（配置导入导出）读写，删了会让老配置文件导入失败；
+            //   · 真正的消费方 `feature/exercise/ExamViewModel.buildSubmitBody()` **完全没改**
+            //     —— 也就是说：**已经开着这些开关的人，行为不变**（继续生效）；
+            //     只是新用户没有界面去打开它们了。
+            //   这正是「只在 ui 层」的边界。若将来要彻底移除，需连 ExamViewModel 与
+            //   ConfigTransfer 一起动，那是另一个决定。
 
             // ==================== PK ====================
+            //
+            // ★ 2026-10-03 两处调整：
+            //   ① 删除「刷 PK 对局」入口 —— 它跳 `RoutePkGrind`，而**刷分区**
+            //      （[cn.apixiaoyuan.app.feature.grind.GrindScreen]）的「PK 刷对局」
+            //      是**同一个路由**，纯重复入口。
+            //   ② 下面三项**注入 H5 的开关全部置灰**（用户要求：「还有其他关于 pk h5
+            //      页面的功能还没写，先把开关设为不可动」）。
+            //
+            //      它们注入的是 `assets/js/pk_auto_next.js` / `pk_no_anim.js` /
+            //      `pk_auto_stroke.js` —— 那三个脚本是照**旧容器**（App 自己发的请求 +
+            //      自己的桥）写的，PK 页换成内置 node 版后这些功能**尚未在新架构上实现**，
+            //      打开也不会生效。置灰而不是删除，是为了：
+            //        · 明确告知「还没做」而不是让用户以为坏了；
+            //        · 保留界面位置，实现后直接去掉 enabled=false 即可。
+            //
+            //      ⚠️ `PkJsInjector` 本身**没改**（仍会按开关注入）—— 保持「只在 ui 层」。
             SectionCard(title = "PK") {
-                EntryRow(
-                    title = "刷 PK 对局",
-                    summary = "纯 API 刷局：选对局类型/对局数/画笔算法，出题→弧线笔迹→提交",
-                    onClick = { navController.navigate(RoutePkGrind) },
-                )
                 SwitchRow(
                     title = "结束页自动化",
-                    summary = "结算页自动开下一局（注入 H5 脚本，三级策略）",
+                    summary = "结算页自动开下一局（注入 H5 脚本，三级策略）" + NOT_WIRED_NOTE,
+                    enabled = false,
                     checked = OldSimianPrefs.autoNextRound,
                     onCheckedChange = {
                         OldSimianPrefs.autoNextRound = it
@@ -197,7 +179,8 @@ fun OldSimianScreen(
                 }
                 SwitchRow(
                     title = "去除排行榜展示动效",
-                    summary = "CSS 动画归零 + 音效静音（只动样式，不碰答题节奏）",
+                    summary = "CSS 动画归零 + 音效静音（只动样式，不碰答题节奏）" + NOT_WIRED_NOTE,
+                    enabled = false,
                     checked = OldSimianPrefs.noRankingAnim,
                     onCheckedChange = {
                         OldSimianPrefs.noRankingAnim = it
@@ -215,7 +198,8 @@ fun OldSimianScreen(
                 )
                 SwitchRow(
                     title = "自动提交画笔",
-                    summary = "题目页自动注入笔迹并触发提交（遍历 Vue 组件树找活体画板）",
+                    summary = "题目页自动注入笔迹并触发提交（遍历 Vue 组件树找活体画板）" + NOT_WIRED_NOTE,
+                    enabled = false,
                     checked = OldSimianPrefs.pkStrokeEnabled,
                     onCheckedChange = {
                         OldSimianPrefs.pkStrokeEnabled = it
@@ -261,25 +245,19 @@ fun OldSimianScreen(
                 )
             }
             // ==================== 分数 ====================
-            SectionCard(title = "分数") {
-                SwitchRow(
-                    title = "自定义分数（刷分）",
-                    summary = "循环「全对上传练习成绩」刷到目标分数，无日限；开启后进二级页设置参数",
-                    checked = OldSimianPrefs.customScoreEnabled,
-                    onCheckedChange = {
-                        OldSimianPrefs.customScoreEnabled = it
-                        OldSimianPrefs.persist()
-                    },
-                )
-                if (OldSimianPrefs.customScoreEnabled) {
-                    EntryRow(
-                        title = "打开刷分页",
-                        summary = "设置目标分数 / 知识点 / 每局题数与间隔",
-                        onClick = { navController.navigate(RouteScorePump) },
-                    )
-                }
-            }
-
+            //
+            // ★ 2026-10-03 按用户要求**整段删除**（原来有两项：开关 + 「打开刷分页」）。
+            //
+            // 两项都在**刷分区**里有同源副本（`GrindScreen` 的「开关」段）：
+            //  - 开关 `customScoreEnabled` 读写的是**同一份** pref
+            //    （`OldSimianPrefs.KEY_CUSTOM_SCORE_ENABLED`）；
+            //  - 「打开刷分页」与刷分区的「直接刷分」跳**同一个** `RouteScorePump`。
+            //
+            // 即：这里删掉不会少任何能力，只是消除重复入口（诚实说明：同一份配置
+            // 现在只能从「主页 → 刷分区」改，这是**行为变更**，但符合用户要求）。
+            //
+            // ⚠️ `OldSimianPrefs.customScoreEnabled` **本身没删** —— 它是**跨层**的
+            // （`ScorePumpViewModel.start()` 里会判它），删了会导致刷分入口点不动。
 
             // ==================== 说明 ====================
             Card(
@@ -303,9 +281,14 @@ fun OldSimianScreen(
                             "自己的 WebView，不 hook 任何进程。",
                         color = MiuixTheme.colorScheme.onSurfaceContainerVariant,
                     )
+                    // ★ 2026-10-03 更新：原来这里写的是「开启『自动全部答对』『自定义答案』
+                    //   会改变练习记录的真实性」—— 那两项的 UI 已按用户要求删除，
+                    //   所以这段话不再适用于本页，换成对「置灰开关」的说明。
+                    //   （注意：Compose 的 Text 不解析 markdown，别写 ** 强调符，
+                    //     否则会原样显示星号。）
                     Text(
-                        text = "所有开关默认关闭。开启「自动全部答对」「自定义答案」" +
-                            "会改变练习记录的真实性，请自行判断是否使用。",
+                        text = "标了「暂不可用」的开关是还没接上（PK H5 功能在新架构上尚未实现），" +
+                            "不是坏了；实现后会开放。其余开关默认关闭。",
                         color = MiuixTheme.colorScheme.onSurfaceContainerVariant,
                     )
                 }
@@ -365,32 +348,6 @@ private fun SwitchRow(
             enabled = enabled,
             onCheckedChange = onCheckedChange,
         )
-    }
-}
-
-/**
- * 入口行：左标题+副标题，整行可点，右侧一个指示箭头。
- *
- * 与 [SwitchRow] 的区别是「点整行跳转」而不是「点开关」—— 二级页入口
- * 不该伪装成开关，所以不用 [Switch]，改用一个 `›` 提示可点。
- */
-@Composable
-private fun EntryRow(
-    title: String,
-    summary: String,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(text = title, color = MiuixTheme.colorScheme.onSurfaceContainer)
-            Text(text = summary, color = MiuixTheme.colorScheme.onSurfaceContainerVariant)
-        }
-        Text(text = "›", color = MiuixTheme.colorScheme.primary)
     }
 }
 
@@ -475,40 +432,6 @@ private fun SliderRow(
             onValueChange = onValueChange,
             valueRange = valueRange,
             onValueChangeFinished = onValueChangeFinished,
-        )
-    }
-}
-
-/**
- * 自定义答案输入行。
- *
- * 用 miuix [TextField] + `rememberTextFieldState`（Compose Foundation 的新
- * TextField API，miuix 的 `TextField(state: TextFieldState, ...)` 就是这个签名）。
- *
- * 持久化时机：`LaunchedEffect(state.text)` —— 文本每变一次就写盘。
- * 这里不防抖是刻意的：答案文本很短（上限 [OldSimianPrefs.CUSTOM_ANSWER_MAX_LEN]
- * 个字符），写盘是 SharedPreferences 的 apply()（异步），开销可忽略。
- */
-@Composable
-private fun AnswerFieldRow(
-    value: String,
-    onValueChange: (String) -> Unit,
-) {
-    val state = rememberTextFieldState(value)
-    LaunchedEffect(state.text.toString()) {
-        val text = state.text.toString().take(OldSimianPrefs.CUSTOM_ANSWER_MAX_LEN)
-        if (text != value) onValueChange(text)
-    }
-    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = "答案内容",
-            color = MiuixTheme.colorScheme.onSurfaceContainer,
-        )
-        TextField(
-            state = state,
-            modifier = Modifier.fillMaxWidth(),
-            label = "如 12 或 +",
-            useLabelAsPlaceholder = true,
         )
     }
 }

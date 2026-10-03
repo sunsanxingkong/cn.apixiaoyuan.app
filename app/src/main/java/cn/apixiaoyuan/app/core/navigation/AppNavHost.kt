@@ -57,22 +57,16 @@ fun AppNavHost(
                 .background(backdropColor),
         ) {
             entry<RouteHome> { root() }
-            // ★ 2026-10-03 按用户要求**移除「接口控制台」**（RouteApi / ApiScreen）。
+            // 接口控制台（2026-09-27，待办 9）。
             //
-            // 用户原话：「把功能页没有实际作用以及后台接口的功能删掉（只在 ui 层）」。
-            // 「接口控制台」就是那个「直接调用应用 OkHttp 打接口」的调试页 ——
-            // 对日常使用没有实际作用，属于开发期工具。
-            //
-            // ⚠️ **只删 UI 入口与页面注册，不删底层**：
-            //   · `feature/api/ApiScreen.kt` / `ApiViewModel.kt` / `ApiRegistry.kt`
-            //     文件仍在（未删源码），将来想恢复只要把下面这段 entry 加回来；
-            //   · `RetrofitFactory.rawClient()`（它专为接口控制台暴露）也保留，
-            //     删了会牵动网络层。
-            //   这样「只在 ui 层」的边界很清楚，回退成本几乎为零。
-            //
-            // 历史备注（保留以便理解当初的坑）：此前这里是 `entry<RouteApi> { root() }`
-            // —— 那是错的，`root()` 是整个四 Tab 的 pager，从首页快捷入口点进来
-            // 会把 pager 再套一层（两个底栏、两份内容）。后来改成渲染自己的页面。
+            // 此前这里是 `entry<RouteApi> { root() }` —— 那是错的：`root()` 是整个
+            // 四 Tab 的 pager，从首页快捷入口点进来会把 pager 再套一层（两个底栏、
+            // 两份内容），所以这条路由实际上**从没被用作页面入口**，`ApiScreen`
+            // 也就一直不可达（只能从「功能」Tab 里的其它页面绕）。
+            // 现在改成像其它二级页一样渲染自己的页面，并给一个左滑返回。
+            entry<RouteApi>(swipeDismiss = NavSwipeDirection.LeftToRight) {
+                cn.apixiaoyuan.app.feature.api.ApiScreen(navController)
+            }
             // RouteRepl / RouteSettings 只作「返回栈状态被系统恢复」时的安全兜底：
             // 正常操作不会把这两个 key 压进栈（切 Tab 走 pager，不压栈），
             // 保留 `root()` 是为了任何情况下栈里都有个能渲染的根。

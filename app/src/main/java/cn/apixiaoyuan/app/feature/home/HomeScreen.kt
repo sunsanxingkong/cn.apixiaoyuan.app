@@ -42,6 +42,7 @@ import cn.apixiaoyuan.app.core.design.icon.AppIcons
 import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.navigation.Route
 import cn.apixiaoyuan.app.core.navigation.RouteAccount
+import cn.apixiaoyuan.app.core.navigation.RouteApi
 import cn.apixiaoyuan.app.core.navigation.RouteExercise
 import cn.apixiaoyuan.app.core.navigation.RouteGrind
 import cn.apixiaoyuan.app.core.navigation.RouteLogin
@@ -109,12 +110,9 @@ fun HomeScreen(navController: AppNavController) {
                 // 「点进去就是和 pk-node 差不多的功能」—— 内部再分三链路。
                 QuickEntry("刷分区", "Grind", "PK 刷局 / 练习刷局 / 直接刷分", RouteGrind),
                 QuickEntry("登录", "Login", "账号域 cookie 登录", RouteLogin),
-                // ★ 2026-10-03 移除「接口控制台」入口。
-                //
-                // 用户要求：「把功能页没有实际作用以及后台接口的功能删掉（只在 ui 层）」。
-                // 这个入口是「直接调用应用 OkHttp 打接口」的调试口，日常使用用不到。
-                // **只摘入口**：`feature/api/` 三个源文件与 `RouteApi` 路由声明都保留，
-                // 需要恢复时把这一行加回来即可（`ApiScreen` 也仍在 `AppNavHost` 外可用）。
+                // 接口控制台提到首页快捷入口（待办 9）：它现在是「直接调用应用 okhttp」
+                // 的调试口，改完一个拦截器就要点一次，藏在「功能」tab 里来回切太慢。
+                QuickEntry("接口控制台", "Api", "直接调用应用 OkHttp 打接口", RouteApi),
                 QuickEntry("练习", "Exercise", "任务卡 / 经验 / 英语章节", RouteExercise),
                 QuickEntry("口算 PK", "Pk", "H5 容器 + cookie 同步", RoutePk),
                 QuickEntry("样本库", "Samples", "请求历史与回放", RouteSamples),

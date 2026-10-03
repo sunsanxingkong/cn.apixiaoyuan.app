@@ -58,12 +58,52 @@ object NodeRuntime {
         File(ctx.applicationInfo.nativeLibraryDir, NODE_SO)
 
     /**
-     * 运行时的库目录（nativeLibraryDir）。
+     * 运行时的库目录。
      *
-     * ⚠️ **必须额外带上 `/system/lib64`**：
-     * Android 版 node 的 DNS resolver（c-ares）在首次解析时会
-     * `dlopen("/system/lib64/libc.so")` 拿 bionic 的符号；
-     * 只给 nativeLibraryDir 会失败并 **SIGABRT 整个进程**。
+     * ## ★★ 为什么是「nativeLibraryDir + /system/lib64」且**这个顺序**
+     *
+     * 两个目录各司其职，缺一不可：
+     *
+     * | 目录 | 提供什么 |
+     * |---|---|
+     * | `nativeLibraryDir` | node 自己的 14 个库（`libnode.so` / `libicudata.so` / `libcrypto.so` / `libcxx_node.so` / `libsqlite3.so` / `libz.so` / `libcares.so` / `libffi.so` / libicu* / libssl …）|
+     * | `/system/lib64` | **Android 系统库**：`libc.so` / `libm.so` / `libdl.so` / `liblog.so`（还有 `libandroid.so` / `libmediandk.so` / `libjnigraphics.so` 等由 node 的运行时代码按需 dlopen）|
+     *
+     * ## ⚠️⚠️ 真机崩溃教训（2026-10-03，`exitCode=134` SIGABRT）
+     *
+     * 早先我们把 Termux 包里的 `libc.so` / `libm.so` / `libdl.so` / `liblog.so`
+     * **也打包进了 APK**（因为当时是在 proot 沙箱里「凑齐依赖」跑通的）。
+     * 真机上服务能起来、能监听，但**收到第一个 HTTP 请求就 abort**：
+     *
+     * ```
+     * [http] GET /pk-h5/pk.html
+     * dlopen failed: TLS symbol "(null)" in dlopened
+     *   "/apex/com.android.runtime/lib64/bionic/libc.so"
+     *   referenced from "/apex/com.android.runtime/lib64/bionic/libc.so"
+     *   using IE access model
+     * 内置 node 已退出：exitCode=134
+     * ```
+     *
+     * 机理：node 处理请求时会 `dlopen` 系统的 bionic libc（APEX 路径），
+     * 而进程里**已经**加载了一份来自 Termux 的 `libc.so` —— 两套 libc 的
+     * TLS（线程局部存储）访问模型冲突 → 链接器直接 abort。
+     *
+     * 为什么「监听能起来、第一个请求才崩」：`listen()` 之后 HTTP 层才会
+     * 触发那些 dlopen（DNS / TLS / 图形等），之前用不到。
+     *
+     * **修法**：把这 4 个系统库**从 APK 里删掉**（不是改名、不是换顺序 ——
+     * 只要文件在 `nativeLibraryDir` 里就会被加载器优先解析，改名也没用），
+     * 让它们统一走 `/system/lib64`。
+     *
+     * 反证：`libandroid.so` / `libmediandk.so` 当时**没**打包，靠系统解析 ——
+     * 它们一直工作正常，正说明「系统库就该由系统提供」。
+     *
+     * ## 为什么还要显式写上 `/system/lib64`
+     *
+     * 用 `linker64` 直接执行非标准路径的 ELF 时，系统**不会**自动补
+     * `/system/lib64`（那是 `LD_LIBRARY_PATH` 空时才有的默认行为，
+     * 而这里 `LD_LIBRARY_PATH` 非空 → 默认搜索路径被整体替换）。
+     * 所以必须显式列出，否则连 `libc.so` 都找不到。
      */
     private fun libPath(ctx: Context): String =
         ctx.applicationInfo.nativeLibraryDir + ":/system/lib64"

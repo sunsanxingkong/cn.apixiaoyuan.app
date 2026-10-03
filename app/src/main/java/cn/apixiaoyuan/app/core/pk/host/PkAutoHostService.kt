@@ -20,6 +20,24 @@ import cn.apixiaoyuan.app.R
  * ## 需求
  *
  * > 「加入后台挂机功能，需要悬浮窗保活，到时候就显示一个悬浮球」
+ * > 「还有后台挂机在练习应该也同样适用才对」（2026-10-03 追加）
+ *
+ * ## ★ 它是**通用**的，不绑定 PK
+ *
+ * 初版把注释写成「让 PK H5 一直跑」，其实这个能力与 PK 无关：
+ * 它要解决的是「**App 退到后台之后还能不能继续干活**」——
+ * 刷 PK、刷练习、刷分三条链路都同样需要。
+ *
+ * 所以它的职责只有两件（**与具体刷什么无关**）：
+ *  1. 前台服务常驻通知 → 系统不轻易回收本进程；
+ *  2. 悬浮球（可见窗口）→ 进一步压住回收，并提供「一点回 App」的入口。
+ *
+ * 至于「在刷什么」，那是各页面自己的 ViewModel 在跑；
+ * 只要 App 进程活着，它们的协程就继续跑。
+ * 因此**同一个开关对练习、PK、刷分一样有效**（入口在「功能」tab）。
+ *
+ * 顺带把内置 node 也热起来（PK H5 / pk-node 管理后台要用）——
+ * 对练习链路无害（node 只是躺着监听本机）。
  *
  * ## 为什么必须是「前台服务」而不是普通 Service
  *
@@ -73,18 +91,17 @@ class PkAutoHostService : Service() {
     private fun startHosting() {
         running = true
 
-        // 0) ★ 2026-10-03：先把**内置 node** 拉起来。
+        // 0) ★ 顺带把**内置 node** 拉起来。
         //
-        // 后台挂机的实质是「让 PK H5 一直跑在 WebView 里」，而那个页面来自
-        // 内置 node（`http://127.0.0.1:8792/pk-h5/pk.html`）。服务没起，
-        // 用户从悬浮球回到 App 时 PK 页就是白屏 —— 挂机等于没挂。
+        // 它服务的是 PK H5 与管理后台（`http://127.0.0.1:8792/`）；
+        // 练习链路不依赖它，热起来也无害（只是躺在本机监听）。
+        // 放在这里是因为「挂机时大概率会去 PK 页」，提前热好省一次首启解压。
         //
         // ⚠️ 必须用 **startAsync**（内部走 Dispatchers.IO）：
         //    `onStartCommand` 跑在**主线程**，而启动流程里有
         //    ① 解压 2.5MB 工作区、② 最多 20s 的 HTTP 探活轮询。
         //    在主线程序列化执行会直接 **ANR**（我初版写的 startBlocking
-        //    就是这个错，已改）。这里只是「提前把服务热起来」，
-        //    晚一两秒就绪完全无害 —— 用户此刻还在别的界面。
+        //    就是这个错，已改）。晚一两秒就绪完全无害 —— 用户此刻还在别的界面。
         PkHostOrchestrator.startAsync(this)
 
         // 1) 前台通知（保活的地基）。API 34+ 起 startForeground 必须声明 type。
@@ -156,12 +173,12 @@ class PkAutoHostService : Service() {
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                "PK 后台挂机",
+                "后台挂机",
                 // LOW：不出提示音、不弹横幅 —— 挂机是长时间后台状态，
                 // 用 DEFAULT 会吵人（而且部分 ROM 会因为「频繁打扰」提醒用户关掉它）。
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "刷 PK 局时的常驻通知（用于保活与快速回到 App）"
+                description = "刷 PK / 练习 / 刷分时的常驻通知（用于保活与快速回到 App）"
                 setShowBadge(false)
             },
         )
@@ -193,7 +210,7 @@ class PkAutoHostService : Service() {
         }
 
         return builder
-            .setContentTitle("PK 挂机中")
+            .setContentTitle("后台挂机中")
             .setContentText("点这里回到 App；悬浮球是那支笔")
             .setSmallIcon(R.drawable.ic_pk_pen)
             .setContentIntent(tap)

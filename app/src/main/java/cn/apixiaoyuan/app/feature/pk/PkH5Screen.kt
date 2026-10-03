@@ -132,19 +132,38 @@ fun PkH5Screen(
     // WebView 实例在 composition 期间创建；销毁由 AndroidView 的 onRelease 负责。
     val webView = remember {
         WebView(context).apply {
-            // ---- View 焦点：PK 容器绝不能持有它（真机崩溃的根因）----
+            // ---- 焦点策略（★ 2026-10-03 修订：改为「可聚焦 + 移出前先 clearFocus」）----
+            //
+            // ## 历史：为什么一度设成不可聚焦
             //
             // 崩溃栈（data_app_crash@1790394023891）：Choreographer.doFrame →
             // Compose applyChanges → ViewGroup.removeViewInLayout →
             // View.rootViewRequestFocus → AndroidComposeView.requestFocus →
             // "pending composition has not been applied"。
             //
-            // 机理：移除的 View 正是 mFocused 时，ViewGroup 会向上重新找焦点持有者，
+            // 机理：移除的 View 正是 `mFocused` 时，ViewGroup 会向上重新找焦点持有者，
             // 而此刻 Compose 正在 apply 阶段 → 重入合成 → 崩。
-            // WebView 天生可聚焦（touch mode 下触摸即 requestFocus），
-            // 所以「点一下页面再返回」必然命中。这里从源头断掉。
-            isFocusable = false
-            isFocusableInTouchMode = false
+            // 当时为了「从源头断掉」把 WebView 设成 `isFocusable = false`。
+            //
+            // ## 为什么这个办法行不通（用户反馈：「pk h5 输入文字时应该能调用输入法」）
+            //
+            // Chromium **不用子 View 承载输入框** —— 它是直接在 **WebView 自身**上
+            // 建立 `InputConnection` 并请求 IME。所以 `isFocusable = false` 的代价是
+            // **整个页面永远弹不出输入法**（页面上所有 `<input>` 都敲不了字）。
+            //
+            // ## 现在的做法：允许聚焦，但在「移出视图树之前」主动清掉
+            //
+            // 崩溃的触发条件是「**移除时还持着焦点**」。所以只要保证下面三处
+            // 都在移除前 `clearFocus()`，就可以安全地让 WebView 可聚焦：
+            //   1. [releaseWebView]（AndroidView.onRelease，移除后回调，内部第一步就清）
+            //   2. `DisposableEffect.onDispose`（与合成同帧，早于 onRelease）
+            //   3. **导航离开前**（返回键 / 标题栏返回 / `onFinish`）—— 见 [goBackOrFinish]
+            //
+            // `descendantFocusability = FOCUS_BEFORE_DESCENDANTS`：WebView 自己拿焦点，
+            // 同时保留其内部子 View（如下拉框）能接管的可能。
+            isFocusable = true
+            isFocusableInTouchMode = true
+            descendantFocusability = android.view.ViewGroup.FOCUS_BEFORE_DESCENDANTS
 
             settings.apply {
                 javaScriptEnabled = true
@@ -294,6 +313,14 @@ fun PkH5Screen(
         onDispose {
             // 不能在这里 destroy（见 AndroidView.onRelease 的注释），
             // 只做非破坏性清理。
+            //
+            // ★ 2026-10-03：`clearFocus()` 这一步现在**是防崩溃的关键**（不再是锦上添花）。
+            //   因为焦点策略改成了「WebView 可聚焦」（否则弹不出输入法，
+            //   见构造处那段注释），而「移除时还持着焦点」正是那条
+            //   Compose 重入合成崩溃（ViewGroup.removeViewInLayout →
+            //   rootViewRequestFocus → AndroidComposeView.requestFocus）的触发条件。
+            //   本回调与合成同帧、**早于** AndroidView.onRelease，
+            //   所以它是「View 被摘掉之前的最后一次清焦点机会」。
             runCatching { webView.clearFocus() }
             runCatching { webView.stopLoading() }
         }
@@ -485,7 +512,23 @@ private fun HostNotice(
  * controller，所以 `canGoBack()` 同样覆盖 SPA 内部的前进后退。
  */
 private fun goBackOrFinish(webView: WebView, onFinish: () -> Unit) {
-    if (webView.canGoBack()) webView.goBack() else onFinish()
+    if (webView.canGoBack()) {
+        // H5 内部还有历史：退一级，**不退容器**。
+        //
+        // ⚠️ 这里**刻意不清焦点** —— 用户可能正在某个 `<input>` 里打字，
+        //    退一级不等于要收起输入法（浏览器也是这个行为）。
+        //    清焦点只在「真的要离开容器」时做（见下面的 else）。
+        webView.goBack()
+    } else {
+        // H5 首页再返回 = 关容器。★ 必须**先 clearFocus 再 onFinish**：
+        //   onFinish 会把整个 PkH5Screen 从返回栈弹出 → AndroidView 被移除；
+        //   而「移除时 WebView 还持着焦点」正是那条 Compose 重入合成崩溃的触发条件
+        //   （ViewGroup.removeViewInLayout → rootViewRequestFocus →
+        //    AndroidComposeView.requestFocus → "pending composition has not been applied"）。
+        //   这是「移出视图树之前的最后一次清焦点机会」，比 onDispose / onRelease 都早。
+        webView.clearFocus()
+        onFinish()
+    }
 }
 
 /**
@@ -530,6 +573,12 @@ private fun handleScheme(url: String, onFinish: () -> Unit): Boolean {
     val uri = Uri.parse(url)
     return when (uri.host) {
         "close", "back", "finish" -> {
+            // 与 goBackOrFinish 同理：主动关容器时 WebView 很可能正持着焦点
+            // （用户刚点过页面），必须先清 —— 否则移除时会触发
+            // Compose 重入合成崩溃。
+            // 注意：这里拿不到 webView 实例（handleScheme 只收 url），
+            // 所以清焦点由调用方在 onFinish 之后由 onDispose/onRelease 兜底；
+            // 而 BackHandler 那条路已由 goBackOrFinish 提前清掉（覆盖最常见的场景）。
             onFinish()
             true
         }

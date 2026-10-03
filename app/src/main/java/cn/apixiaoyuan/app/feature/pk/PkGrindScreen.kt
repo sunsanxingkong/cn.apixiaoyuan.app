@@ -24,13 +24,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.LocalLifecycleOwner
+// ★ 2026-10-03：`LocalLifecycleOwner` 已不再需要 —— 用它的是「后台挂机」卡片，
+//   那张卡片已搬到「功能」tab（`OldSimianScreen.HostingSection`）。
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cn.apixiaoyuan.app.core.account.SubAccountItem
 import cn.apixiaoyuan.app.core.design.component.AppScrollScaffold
 import cn.apixiaoyuan.app.core.design.component.AutoFollowScroll
 import cn.apixiaoyuan.app.core.navigation.AppNavController
-import cn.apixiaoyuan.app.core.pk.host.PkAutoHostService
 import cn.apixiaoyuan.app.core.pk.PkStrokeMode
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.Card
@@ -266,71 +266,16 @@ fun PkGrindScreen(
                 }
             }
 
-            // ★ 2026-10-03：后台挂机（前台服务 + 悬浮球保活）。
+            // ★ 2026-10-03：这里原来有「后台挂机（悬浮球保活）」卡片 —— 已**搬到
+            // 「功能」tab**（`OldSimianScreen.HostingSection`）。
             //
-            // 为什么要单独一个卡片：挂机依赖两个**用户手动授予**的权限，
-            // 不给权限时表现是「开关打开了但球没出来」，必须在 UI 上把
-            // 原因说清楚，否则用户只会觉得「坏了」。
-            val hostCtx = LocalContext.current
-            var hostOn by remember { mutableStateOf(PkAutoHostService.isRunning()) }
-            var hostNote by remember { mutableStateOf<String?>(null) }
+            // 用户原话：「后台挂机在练习应该也同样适用才对，把后台悬浮窗的开关做进
+            // tab 栏功能里而不是放到刷分」。保活是全局能力（与 PK 无关），
+            // 放在刷 PK 对局页会让「练习挂机」的人找不到。
+            //
+            // 删掉这里而不是两处都留：同一个开关出现在两个页面会让人怀疑
+            // 「是不是两份配置」。`PkAutoHostService` 本身没动，功能完全一样。
 
-            // 从系统设置页返回时刷新一次状态（用户可能刚授完权限）。
-            val lifecycleOwner = LocalLifecycleOwner.current
-            DisposableEffect(lifecycleOwner) {
-                val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
-                    if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                        hostOn = PkAutoHostService.isRunning()
-                    }
-                }
-                lifecycleOwner.lifecycle.addObserver(obs)
-                onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
-            }
-
-            SectionCard(title = "后台挂机（悬浮球保活）") {
-                Button(
-                    onClick = {
-                        val want = !PkAutoHostService.isRunning()
-                        if (want) {
-                            // 悬浮窗是**特殊权限**，只能跳系统设置页让用户手动开。
-                            // 没权限就给引导，别假装启动成功。
-                            val canOverlay =
-                                android.provider.Settings.canDrawOverlays(hostCtx)
-                            if (!canOverlay) {
-                                hostNote = "先去系统设置里打开「显示在其他应用上层」，再回来点一次"
-                                runCatching {
-                                    hostCtx.startActivity(
-                                        android.content.Intent(
-                                            android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                            android.net.Uri.parse("package:" + hostCtx.packageName),
-                                        ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
-                                    )
-                                }
-                                return@Button
-                            }
-                        }
-                        PkAutoHostService.toggle(hostCtx, want)
-                        hostOn = want
-                        hostNote = if (want) {
-                            "已开启：状态栏常驻通知 + 屏幕上多出一支笔（可拖动，点击回到 App）"
-                        } else {
-                            "已关闭：悬浮球与通知都已撤下"
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (hostOn) "关闭后台挂机" else "开启后台挂机")
-                }
-                Text(
-                    text = "开启后：① 前台服务常驻通知（系统不轻易回收）；" +
-                        "② 屏幕上出现一个**背景透明的笔形悬浮球**，可拖动、点击回到本 App。" +
-                        "两者叠加才算保活 —— 只有通知或只有悬浮球都压不住后台回收。",
-                    color = MiuixTheme.colorScheme.onSurfaceContainerVariant,
-                )
-                hostNote?.let {
-                    Text(text = it, color = MiuixTheme.colorScheme.primary)
-                }
-            }
             // ★ 2026-10-03：运行日志（用户要求「pk 刷局加个日志显示就和刷练习一样」）。
             //
             // 与 `ExercisePumpScreen` 的日志区**同款**：

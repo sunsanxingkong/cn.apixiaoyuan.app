@@ -49,6 +49,32 @@ object PkJsInjector {
     /** 已注入过脚本的页面标记（按 WebView 实例区分，避免多 WebView 串味）。 */
     private val injected = java.util.WeakHashMap<WebView, Boolean>()
 
+    /**
+     * Eruda 脚本在 WebView `localStorage` 里的键（★ 2026-10-03）。
+     *
+     * ## 为什么要写进 localStorage（用户要求「js 控制台配置要持久化」）
+     *
+     * 之前每次加载都从 `assets/js/eruda.js` **重新读 474 KB 并注入** ——
+     * 那是纯浪费：SPA 每次内部导航都会 `onPageFinished`，PC 端 DevTools 也是
+     * 一次下载长期缓存。写进 `localStorage` 后：
+     *
+     *  - 站点已经有这个键 → 直接用缓存里的脚本，不再读 assets；
+     *  - 没有 → 读一次 assets 并**顺手存进去**，下次就不用再读。
+     *
+     * ## 为什么必须用「两步注入」而不是直接把脚本内容拼进 JS
+     *
+     * 脚本本身有 474KB，直接 `evaluateJavascript(巨大的字符串)` 有两个问题：
+     *  1. 超过 Binder 传输上限的风险（Chromium 走 IPC）；
+     *  2. 里面的换行/引号要整体转义，极易出错（本项目已多次在
+     *     「内嵌 JS 模板字符串」上翻车，见 `check-inject.js` 的由来）。
+     *
+     * 所以做法是：**把脚本内容当作普通字符串参数传进去**，由页面侧
+     * `localStorage.setItem(KEY, <参数>)` 保存。
+     * 参数用 `JSONObject.quote()` 转义（那是 JSON 的 `"..."` 字面量规则，
+     * 与 JS 字符串字面量兼容），**不做手工转义**。
+     */
+    private const val ERUDA_LS_KEY = "__laogua_eruda_js"
+
     /** 在 `onPageStarted` 里调用，重置注入标记。 */
     fun markPageStarted(webView: WebView) {
         injected.remove(webView)
@@ -103,26 +129,61 @@ object PkJsInjector {
         // Eruda 调试面板：脚本 + `eruda.init()` 两步（缺 init 不浮面板）。
         // 对齐 WeKit 的 `ErudaConsole`（它也是 evaluateJavascript 两次）。
         if (prefs.h5DebugConsole) {
-            // 幂等：SPA 内部导航会多次触发 onPageFinished，重复 init 会叠出多个面板。
+            // 幂等 + **持久化**（2026-10-03，用户要求「js 控制台配置要持久化」）。
+            //
+            // 判定顺序（页面侧一段 JS 搞定）：
+            //  1. `document.head` 不存在 → 还没就绪，什么都不做（onPageFinished 会再来）；
+            //  2. `window.eruda._isInit` → 本次加载已经初始化过，避免 SPA 内部导航
+            //     反复 init 叠出多个面板；
+            //  3. `localStorage` 里**已有脚本** → 直接 eval 它（**不读 assets**），
+            //     再 init —— 这就是「持久化」带来的省事；
+            //  4. 都没有 → 回一个特殊串，由原生读一次 assets 并写进 localStorage。
             webView.evaluateJavascript(
-                "(function(){if(window.eruda&&window.eruda._isInit)return false;return true;})()",
+                "(function(){" +
+                    "if(!document.head) return 'NOTREADY';" +
+                    "if(window.eruda&&window.eruda._isInit) return 'DONE';" +
+                    "var src=null;try{src=localStorage.getItem('" + ERUDA_LS_KEY + "')}catch(e){}" +
+                    "if(src){try{(new Function(src))();}catch(e){src=null;}}" +
+                    "return src?'CACHED':'NEED';" +
+                    "})()",
                 android.webkit.ValueCallback { r ->
-                    if (r != "true") return@ValueCallback
-                    val ok = inject(webView, "js/eruda.js")
-                    if (ok) {
-                        // ★ 第二步：初始化面板。没有这句，脚本只加载不显示。
-                        webView.evaluateJavascript(
-                            "try{eruda.init({useShadowDom:true,defaultPanel:'console'});" +
-                                "eruda.get('console').config.set('displayTimestamps',true);" +
-                                "console.log('[老挂] Eruda 已注入');}catch(e){console.error('eruda.init 失败',e);}",
-                            null,
-                        )
+                    when (r?.trim('"')) {
+                        "NOTREADY", "DONE" -> Unit
+                        else -> {
+                            // 'NEED' → 读 assets；'CACHED' → 也走这里（下面只负责 init）
+                            if (r?.trim('"') == "NEED") {
+                                val js = readAsset(webView, "js/eruda.js")
+                                if (js.isNullOrBlank()) return@ValueCallback
+                                // ★ 用 JSON 字符串字面量传参，**不手工转义**。
+                                //   474KB 走 evaluateJavascript 是没问题的
+                                //   （Chromium 的 devtools 通道按块传，不是 Binder 单包）。
+                                webView.evaluateJavascript(
+                                    "try{localStorage.setItem('" + ERUDA_LS_KEY + "', " +
+                                        org.json.JSONObject.quote(js) + ");}catch(e){}",
+                                    null,
+                                )
+                            }
+                            // init（无论 CACHED 还是刚写入）
+                            webView.evaluateJavascript(
+                                "try{if(window.eruda&&!window.eruda._isInit){" +
+                                    "eruda.init({useShadowDom:true,defaultPanel:'console'});" +
+                                    "eruda.get('console').config.set('displayTimestamps',true);" +
+                                    "console.log('[老挂] Eruda 已就绪（脚本已持久化到 localStorage）');" +
+                                    "}}catch(e){console.error('eruda.init 失败',e);}",
+                                null,
+                            )
+                        }
                     }
                 },
             )
         }
         return count
     }
+
+    /** 从 assets 读文本。读不到返回 null（不影响 H5 本身）。 */
+    private fun readAsset(webView: WebView, assetPath: String): String? = runCatching {
+        webView.context.assets.open(assetPath).bufferedReader().use { it.readText() }
+    }.getOrNull()
 
     /** 从 assets 读脚本并执行。读不到 / 执行失败都静默返回 false，不影响 H5 本身。 */
     private fun inject(webView: WebView, assetPath: String): Boolean = runCatching {

@@ -5,13 +5,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,14 +24,15 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.design.component.AppScrollScaffold
-// ★ 2026-10-03 删除 RoutePkGrind / RouteScorePump 两个 import：
-//   对应入口（「刷 PK 对局」「打开刷分页」）已从本页移除，留着会有 unused import 警告。
 import cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs
+import cn.apixiaoyuan.app.core.pk.host.PkAutoHostService
+import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
+// `TextField` 仍被 [CostFieldRow]（「开下一局间隔」「提交次数」等数字输入）使用。
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -137,6 +139,23 @@ fun OldSimianScreen(
             //     只是新用户没有界面去打开它们了。
             //   这正是「只在 ui 层」的边界。若将来要彻底移除，需连 ExamViewModel 与
             //   ConfigTransfer 一起动，那是另一个决定。
+
+            // ==================== 后台挂机 ====================
+            //
+            // ★ 2026-10-03：从**刷 PK 对局页**（`PkGrindScreen`）搬到这里。
+            //
+            // 用户原话：「后台挂机在练习应该也同样适用才对，把后台悬浮窗的开关做进
+            // tab 栏功能里而不是放到刷分」。
+            //
+            // 为什么搬得动：`PkAutoHostService` 本身**与 PK 无关** —— 它只做三件事：
+            //   ① 起内置 node（`PkHostOrchestrator.startAsync`，给 PK H5 用）；
+            //   ② 前台服务常驻通知（系统不轻易回收本进程）；
+            //   ③ 悬浮球（可见窗口 → 更难被回收 + 一键回 App）。
+            // 也就是说它是**整个 App 的保活手段**，练习挂机同样受益
+            // （练习刷局跑在 App 自己的进程里，进程活着才不会半路被回收）。
+            //
+            // 放在「功能」tab 而不是刷分页：保活是全局能力，不该藏在某一个刷分链路里。
+            HostingSection()
 
             // ==================== PK ====================
             //
@@ -259,6 +278,19 @@ fun OldSimianScreen(
             // ⚠️ `OldSimianPrefs.customScoreEnabled` **本身没删** —— 它是**跨层**的
             // （`ScorePumpViewModel.start()` 里会判它），删了会导致刷分入口点不动。
 
+            // ==================== 后台挂机（悬浮球保活） ====================
+            //
+            // ★ 2026-10-03 从「刷 PK 对局」页搬到这里（用户要求：
+            //   「后台挂机在练习应该也同样适用才对，把后台悬浮窗的开关做进 tab 栏
+            //     功能里而不是放到刷分」）。
+            //
+            // 它与「刷什么」无关 —— 只做「前台服务常驻通知 + 可见悬浮球」，
+            // 目的是让 App 进程别被系统回收，于是 PK / 练习 / 刷分三条链路的
+            // 协程都能在后台继续跑。放在 PK 页里会让人误以为只对 PK 生效。
+            SectionCard(title = "后台挂机") {
+                AutoHostSwitchCard()
+            }
+
             // ==================== 说明 ====================
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -293,6 +325,87 @@ fun OldSimianScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * 「后台挂机（悬浮球保活）」开关（★ 2026-10-03 从刷 PK 对局页搬来）。
+ *
+ * ## 为什么放在功能 tab 而不是刷分页
+ *
+ * 用户原话：「后台挂机在练习应该也同样适用才对，把后台悬浮窗的开关做进 tab 栏
+ * 功能里而不是放到刷分」。
+ *
+ * 保活是**全局能力**：[cn.apixiaoyuan.app.core.pk.host.PkAutoHostService] 只做
+ * ① 起内置 node ② 前台服务常驻通知 ③ 悬浮球 —— 三件事都跟「刷 PK」无关。
+ * 练习刷局跑在 App 自己进程里，进程活着同样受益（否则挂到一半被回收）。
+ *
+ * ## 为什么要单独一段、还要写这么多说明
+ *
+ * 挂机依赖两个**用户手动授予**的权限。不给权限时表现是「开关打开了但球没出来」，
+ * 不把原因写在界面上，用户只会觉得「坏了」。
+ */
+@Composable
+private fun HostingSection() {
+    val hostCtx = androidx.compose.ui.platform.LocalContext.current
+    var hostOn by remember { mutableStateOf(PkAutoHostService.isRunning()) }
+    var hostNote by remember { mutableStateOf<String?>(null) }
+
+    // 从系统设置页返回时刷新一次状态（用户可能刚授完权限）。
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hostOn = PkAutoHostService.isRunning()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    SectionCard(title = "后台挂机（悬浮球保活）") {
+        Button(
+            onClick = {
+                val want = !PkAutoHostService.isRunning()
+                if (want) {
+                    // 悬浮窗是**特殊权限**，只能跳系统设置页让用户手动开。
+                    // 没权限就给引导，别假装启动成功。
+                    val canOverlay = android.provider.Settings.canDrawOverlays(hostCtx)
+                    if (!canOverlay) {
+                        hostNote = "先去系统设置里打开「显示在其他应用上层」，再回来点一次"
+                        runCatching {
+                            hostCtx.startActivity(
+                                android.content.Intent(
+                                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    android.net.Uri.parse("package:" + hostCtx.packageName),
+                                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                        return@Button
+                    }
+                }
+                PkAutoHostService.toggle(hostCtx, want)
+                hostOn = want
+                hostNote = if (want) {
+                    "已开启：状态栏常驻通知 + 屏幕上多出一支笔（可拖动，点击回到 App）"
+                } else {
+                    "已关闭：悬浮球与通知都已撤下"
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (hostOn) "关闭后台挂机" else "开启后台挂机")
+        }
+        Text(
+            text = "「后台挂机」= 让 App 进程别被系统回收，**练习刷局与 PK 刷局都受益**。\n" +
+                "开启后：① 前台服务常驻通知；② 屏幕上出现一支背景透明的笔形悬浮球" +
+                "（可拖动，点击回到 App）。\n" +
+                "两者叠加才算保活 —— 只有通知或只有悬浮球都压不住后台回收。",
+            color = MiuixTheme.colorScheme.onSurfaceContainerVariant,
+        )
+        hostNote?.let {
+            Text(text = it, color = MiuixTheme.colorScheme.primary)
         }
     }
 }

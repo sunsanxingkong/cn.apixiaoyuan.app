@@ -42,6 +42,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import cn.apixiaoyuan.app.core.design.icon.AppIcons
 import androidx.compose.foundation.background
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -147,6 +151,18 @@ fun PkH5Screen(
     // 详见 core/design/component/H5PageColor.kt。
     val pageColor = rememberH5PageColor()
 
+    // ★ 2026-10-03：H5 内部跳转的「切页动画」
+    //   （用户要求「进入下一个 h5 页面应该也有切页动画（有预测性返回）」）。
+    //
+    // ⚠️ 状态必须放在一个 **holder 对象** 里，不能写成 composable 局部变量：
+    //    WebView 是在 `remember { WebView(...).apply { ... } }` 里创建的，
+    //    那个 lambda **不是 composable 作用域**，里面引用不到 composable 局部状态
+    //    （我第一次写就撞了 `Unresolved reference`）。holder 用 `remember` 造、
+    //    内部持 Compose 状态（`mutableFloatStateOf`），两边就都能访问。
+    //
+    // 实现与局限见文件末尾 [NavAnimHolder] 的 KDoc。
+    val navAnim = remember { NavAnimHolder() }
+
     // WebView 实例在 composition 期间创建；销毁由 AndroidView 的 onRelease 负责。
     val webView = remember {
         WebView(context).apply {
@@ -232,6 +248,11 @@ fun PkH5Screen(
                     // 重置注入标记：同一次加载 onPageFinished 可能回调多次，
                     // 不重置会导致脚本（尤其带 setInterval 的）被叠加注入多轮。
                     view?.let { PkJsInjector.markPageStarted(it) }
+
+                    // ★ H5 内部切页动画（见上面 navAnim 的说明）。
+                    //   浏览器在 onPageStarted 时已经把旧画面清空（= 白屏），
+                    //   所以这正是铺「画面移交」覆盖层的最佳时机。
+                    navAnim.onMainNav(url)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -257,6 +278,10 @@ fun PkH5Screen(
                     view?.let { PkJsInjector.injectIfEnabled(it) }
                     // 每次都探：SPA 内部导航会换「页面」，底色未必相同。
                     view?.let { probeH5PageColor(it, pageColor, tag = "PkH5") }
+                    // ★ 切页动画收尾：新文档就绪 → 拿掉「画面移交」覆盖层。
+                    //   直接 finish（不走动画）最干净：onPageFinished 与动画时长
+                    //   没有先后保证，让覆盖层自己渐隐反而可能「叠一下」。
+                    navAnim.finish()
                 }
 
                 override fun onReceivedError(
@@ -427,6 +452,40 @@ fun PkH5Screen(
                 // 放在 DisposableEffect.onDispose 里会与 requestFocus 重入竞争崩溃。
                 onRelease = { view -> releaseWebView(view) },
             )
+
+// ---- ★ H5 内部切页的「画面移交」覆盖层 ----
+            //
+            // 为什么需要它：H5 跳下一页时浏览器会把旧画面**清空**（= 白屏），
+            // 而新页面要等网络 + 渲染才有东西。这段空窗期就是用户看到的「白闪」。
+            //
+            // 这里用 **H5 自己的底色 `bg`** 铺满（不是刺眼的白），并让整块画面
+            // 从右侧滑入 + 淡入，时长/缓动与 app 二级页转场（miuix, 260ms）对齐 ——
+            // 观感上就是「进入下一个 h5 页面也有切页动画」。
+            //
+            // ⚠️ 动画本身交给 Compose 的 [animateFloatAsState]：
+            //    holder 只负责「什么时候开始（progress=0）/ 结束（progress=1）」，
+            //    插值曲线由这里声明 —— 这样动画由 Compose 的帧时钟驱动，
+            //    不需要自己起协程，也不会因为重组被打断。
+            //
+            // ⚠️ 局限（如实说明）：拿不到旧页面的画面快照，所以只有「新页滑入」，
+            //    没有「旧页滑出」那半边。
+            val navAnimProgress by animateFloatAsState(
+                targetValue = navAnim.progress,
+                animationSpec = tween(durationMillis = 260),
+                label = "pk-h5-nav",
+            )
+            if (navAnim.visible) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            // 从右侧 12% 处滑入（不是整屏宽 —— 整屏滑入在手机上太「重」）
+                            translationX = (1f - navAnimProgress) * (size.width * 0.12f)
+                            alpha = navAnimProgress.coerceIn(0f, 1f)
+                        }
+                        .background(bg),
+                )
+            }
 
             // ---- 就绪前的覆盖层 / 失败提示 ----
             //
@@ -623,4 +682,97 @@ private fun handleScheme(url: String, onFinish: () -> Unit): Boolean {
         // （拦了反而会让 H5 的多 WebView 跳转失效）。
         else -> false
     }
+}
+
+/**
+ * H5 内部跳转的「画面移交」动画状态（★ 2026-10-03）。
+ *
+ * # 为什么需要它（用户在要求什么）
+ *
+ * > 「进入下一个 h5 页面应该也有切页动画（有预测性返回）」
+ *
+ * app 级的二级页转场（`AppNavTransition` / `NavTransitions.MiuixDefault`）**管不到
+ * H5 内部跳转** —— 因为始终是同一个 WebView、同一条路由，跳转是 pk-node 在页面里
+ * 执行 `location.href = <本地化后的 url>`（浏览器式硬跳，没有转场）。
+ *
+ * # 为什么状态要放在对象里（踩过的坑）
+ *
+ * 第一次实现时我把 `mutableStateOf` 直接写成 `PkH5Screen` 的局部变量，
+ * 结果编译报一串 `Unresolved reference`。原因：
+ *
+ * **WebView 是在 `remember { WebView(context).apply { ... } }` 里创建的**，
+ * 而 `remember` 的那个 lambda **不是 `@Composable` 作用域** —— 它里面引用不到
+ * 外层 composable 的局部变量（`pageAnim` / `animScope` / `lastMainUrl` 全都拿不到）。
+ *
+ * 解法：把状态封进一个普通 class 实例，用 `remember { NavAnimHolder() }` 创建；
+ * 内部用 `mutableFloatStateOf` 持有 Compose 状态。这样 WebViewClient 回调里
+ * （通过闭包捕获 holder）和 composable 里（直接读 holder）都能访问。
+ *
+ * # 什么时候播 / 不播
+ *
+ * 只在**主文档导航**（`pk.html` → `external.html` / 荣誉榜页 …）时播。
+ * pk.html 内部的换页走 **hash 路由**（`#/xxx`）—— 那不算「进入下一个页面」，
+ * 给它也播会变成「点任何东西都闪一下」。
+ * 判据是 [isMainNav]：比较**路径（去 query 去 hash）+ host**，任一不同才算切页。
+ *
+ * # 局限（如实说明）
+ *
+ * 拿不到旧页面的画面快照，所以只有「新页从右侧滑入 + 淡入」，
+ * 没有「旧页滑出」那半边 —— 观感是「底色 → 新页」，而不是完整的双向转场。
+ * 真要做双向，得靠 WebView 绘制快照（`onDraw` 抓 bitmap）或改用
+ * `ViewPager` 式的双 WebView，成本与风险都高得多。
+ */
+private class NavAnimHolder {
+
+    /** 动画进度：0 = 刚开始（画面在右侧、透明），1 = 结束（归位、不透明）。 */
+    var progress by mutableFloatStateOf(1f)
+        private set
+
+    /** 是否正在播放（false 时不渲染覆盖层，避免常态多一层 Box）。 */
+    var visible by mutableStateOf(false)
+        private set
+
+    /** 上一次**主文档**地址，用于区分「切页」与「SPA 内部 hash 变化」。 */
+    private var lastUrl: String? = null
+
+    /**
+     * 在 `onPageStarted` 调用。
+     *
+     * 此时浏览器**已经把旧画面清空**（所以那一瞬是白屏）—— 正是铺移交层的最佳时机。
+     */
+    fun onMainNav(url: String?) {
+        if (url.isNullOrBlank()) return
+        val first = lastUrl == null
+        val changed = isMainNav(lastUrl, url)
+        lastUrl = url
+        // 首次加载不播：那时还在「启动内置服务」的覆盖层里，播了也看不到，
+        // 反而会在启动完成那一刻多闪一次。
+        if (first || !changed) return
+        visible = true
+        progress = 0f
+    }
+
+    /** 在 `onPageFinished` 调用：新文档就绪，撤掉移交层。 */
+    fun finish() {
+        visible = false
+        progress = 1f
+    }
+
+    /**
+     * 是否是「进入另一个文档」（而不是同文档的 hash / query 变化）。
+     *
+     * 例：
+     *  - `pk.html#/a` → `pk.html#/b`      ：同文档，**不算**（SPA 换页）
+     *  - `pk.html` → `exercise.html?…`    ：**算**
+     *  - 换 host（`xyks...` → 本机）       ：**算**
+     */
+    private fun isMainNav(prev: String?, next: String): Boolean {
+        if (prev.isNullOrBlank()) return false
+        return pathOf(prev) != pathOf(next) || hostOf(prev) != hostOf(next)
+    }
+
+    private fun pathOf(u: String) = u.substringBefore('#').substringBefore('?')
+
+    private fun hostOf(u: String) =
+        runCatching { java.net.URI(u).host ?: "" }.getOrDefault("")
 }

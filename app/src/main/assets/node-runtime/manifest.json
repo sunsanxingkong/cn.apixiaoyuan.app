@@ -1,0 +1,162 @@
+{
+  "node": "26.4.0",
+  "termuxDeb": "26.4.0-1",
+  "arch": "arm64-v8a",
+  "entry": "bin/linker64",
+  "nodeBin": "bin/node",
+  "totalBytes": 189721120,
+  "files": {
+    "bin/linker64": {
+      "sha256": "e4fab28a04efc94369eca4900c5f5afdf3ac85f3f66d0c29776f3ea10b31e484",
+      "size": 2473376
+    },
+    "bin/node": {
+      "sha256": "a0d21a1589312919114b24a5cc520c30ab7f26f9985b3f0c643c153172ebd1e6",
+      "size": 49715528
+    },
+    "lib/libc++_shared.so": {
+      "sha256": "05bef9d3901910c3ff8ab450b03bc8b28383d363a2290f2f7b9aed7331ea6ff7",
+      "size": 1423696
+    },
+    "lib/libc.so": {
+      "sha256": "0ba15a6384256194e0b78265814b2fcd04da88f6e27eb6d26998bb94df78e51a",
+      "size": 1332472
+    },
+    "lib/libcares.so": {
+      "sha256": "68733ce8d4bb1bdc87d8ec550c58c70f3dcdb0f8c48d86b83235f536cb736e83",
+      "size": 256776
+    },
+    "lib/libcrypto.so": {
+      "sha256": "5dddfd86746aabaca2c13eea108c8968811a4f9dcccf5889e34ebff6be920949",
+      "size": 5213680
+    },
+    "lib/libcrypto.so.3": {
+      "sha256": "5dddfd86746aabaca2c13eea108c8968811a4f9dcccf5889e34ebff6be920949",
+      "size": 5213680
+    },
+    "lib/libdl.so": {
+      "sha256": "9805c2a013d994bdefc1c124027c53de81060afc901d2188b6eafdf6783140d4",
+      "size": 50912
+    },
+    "lib/libffi.so": {
+      "sha256": "e118d741361c64015c074c5e1f24e42e44292d0d694ca3ba1e109205c10421f9",
+      "size": 87128
+    },
+    "lib/libicudata.so": {
+      "sha256": "71a7479056941b610589f82698cdfb220c169dce9bc7c78ef6a6e74d07b1e8fd",
+      "size": 33108832
+    },
+    "lib/libicudata.so.78": {
+      "sha256": "71a7479056941b610589f82698cdfb220c169dce9bc7c78ef6a6e74d07b1e8fd",
+      "size": 33108832
+    },
+    "lib/libicudata.so.78.3": {
+      "sha256": "71a7479056941b610589f82698cdfb220c169dce9bc7c78ef6a6e74d07b1e8fd",
+      "size": 33108832
+    },
+    "lib/libicui18n.so": {
+      "sha256": "3140b2b28d16a6486a65663f1c47a94a4bb0d9def51612f8e941414bd50c7a0e",
+      "size": 3358568
+    },
+    "lib/libicui18n.so.78": {
+      "sha256": "3140b2b28d16a6486a65663f1c47a94a4bb0d9def51612f8e941414bd50c7a0e",
+      "size": 3358568
+    },
+    "lib/libicui18n.so.78.3": {
+      "sha256": "3140b2b28d16a6486a65663f1c47a94a4bb0d9def51612f8e941414bd50c7a0e",
+      "size": 3358568
+    },
+    "lib/libicuio.so": {
+      "sha256": "7d7aa87a56f1919450f9539257b78dc71959083482a30ce9e56d5ff9d024202e",
+      "size": 80136
+    },
+    "lib/libicuio.so.78": {
+      "sha256": "7d7aa87a56f1919450f9539257b78dc71959083482a30ce9e56d5ff9d024202e",
+      "size": 80136
+    },
+    "lib/libicuio.so.78.3": {
+      "sha256": "7d7aa87a56f1919450f9539257b78dc71959083482a30ce9e56d5ff9d024202e",
+      "size": 80136
+    },
+    "lib/libicutest.so": {
+      "sha256": "b7038a3a1696e8e2fde4fc3fc924d0fa8a753aa939cfeb83cb51ffb0ce7ded58",
+      "size": 97008
+    },
+    "lib/libicutest.so.78": {
+      "sha256": "b7038a3a1696e8e2fde4fc3fc924d0fa8a753aa939cfeb83cb51ffb0ce7ded58",
+      "size": 97008
+    },
+    "lib/libicutest.so.78.3": {
+      "sha256": "b7038a3a1696e8e2fde4fc3fc924d0fa8a753aa939cfeb83cb51ffb0ce7ded58",
+      "size": 97008
+    },
+    "lib/libicutu.so": {
+      "sha256": "132e6d528338976c0305351360daf3ef53f71a85eb4380ade175750b9680ee55",
+      "size": 228896
+    },
+    "lib/libicutu.so.78": {
+      "sha256": "132e6d528338976c0305351360daf3ef53f71a85eb4380ade175750b9680ee55",
+      "size": 228896
+    },
+    "lib/libicutu.so.78.3": {
+      "sha256": "132e6d528338976c0305351360daf3ef53f71a85eb4380ade175750b9680ee55",
+      "size": 228896
+    },
+    "lib/libicuuc.so": {
+      "sha256": "91bcef1faba58b755d4870aaea95814d1753961fd72365c4701cfd4461e3584c",
+      "size": 2029568
+    },
+    "lib/libicuuc.so.78": {
+      "sha256": "91bcef1faba58b755d4870aaea95814d1753961fd72365c4701cfd4461e3584c",
+      "size": 2029568
+    },
+    "lib/libicuuc.so.78.3": {
+      "sha256": "91bcef1faba58b755d4870aaea95814d1753961fd72365c4701cfd4461e3584c",
+      "size": 2029568
+    },
+    "lib/liblog.so": {
+      "sha256": "f0664c535f854e30403bc5f3561da178dea0142d1f9847220ba54cb18971e830",
+      "size": 102736
+    },
+    "lib/libm.so": {
+      "sha256": "646b2a1cab7cb7b035df3fe9f7beee11ab22d5e6bd6dc7d66e96e2429a05586e",
+      "size": 249072
+    },
+    "lib/libsqlite3.53.4.so": {
+      "sha256": "5973b314d794aab0dbc9424d5748f80e4873561f7584707461f55d03877bcd05",
+      "size": 1278752
+    },
+    "lib/libsqlite3.so": {
+      "sha256": "2305d0c8f90757fef4be25314f69a7ad412a970a1ca4fba7ba85bbbf4a37708a",
+      "size": 1211232
+    },
+    "lib/libsqlite3.so.0": {
+      "sha256": "2305d0c8f90757fef4be25314f69a7ad412a970a1ca4fba7ba85bbbf4a37708a",
+      "size": 1211232
+    },
+    "lib/libsqlite3.so.3.53.4": {
+      "sha256": "2305d0c8f90757fef4be25314f69a7ad412a970a1ca4fba7ba85bbbf4a37708a",
+      "size": 1211232
+    },
+    "lib/libssl.so": {
+      "sha256": "595ce9fe0189a24ceae2eaa07721ac428a6df26794f5bfcfe4347013cbd4b9f2",
+      "size": 880976
+    },
+    "lib/libssl.so.3": {
+      "sha256": "595ce9fe0189a24ceae2eaa07721ac428a6df26794f5bfcfe4347013cbd4b9f2",
+      "size": 880976
+    },
+    "lib/libz.so": {
+      "sha256": "c47748ed4b6ca6a2ecd664bab04795f3493956ab1f5cddc4ba0efa737ef3b711",
+      "size": 72880
+    },
+    "lib/libz.so.1": {
+      "sha256": "c47748ed4b6ca6a2ecd664bab04795f3493956ab1f5cddc4ba0efa737ef3b711",
+      "size": 72880
+    },
+    "lib/libz.so.1.3.2": {
+      "sha256": "c47748ed4b6ca6a2ecd664bab04795f3493956ab1f5cddc4ba0efa737ef3b711",
+      "size": 72880
+    }
+  }
+}

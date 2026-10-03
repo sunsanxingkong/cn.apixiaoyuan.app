@@ -1,11 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
+
+    <!-- ===================== PK 后台挂机（2026-10-03 新增） =====================
+         保活需要三件套，缺一不可：
+           FOREGROUND_SERVICE + FOREGROUND_SERVICE_SPECIAL_USE → 前台服务本身
+           POST_NOTIFICATIONS（API 33+ 运行时权限）           → 前台服务必须有可见通知
+           SYSTEM_ALERT_WINDOW（特殊权限，需手动授予）        → 悬浮球（那只笔）
+         ---------------------------------------------------------------- -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
 
     <application
         android:name=".App"
@@ -24,6 +35,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- PK 后台挂机：前台服务（常驻通知 + 悬浮球）。
+             foregroundServiceType 必须是 specialUse —— 它是「其它类」的兜底类型；
+             同时要在 service 里再声明一次对应权限（Android 14 起的要求）。 -->
+        <service
+            android:name=".core.pk.host.PkAutoHostService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="pk auto grind keepalive" />
+        </service>
     </application>
 
 </manifest>

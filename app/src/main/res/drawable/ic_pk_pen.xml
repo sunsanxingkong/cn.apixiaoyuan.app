@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  悬浮球图标：一支「用 SVG 画的笔」。
+
+  ## 为什么是描边（stroke）而不是填充（fill）
+
+  用户要求「背景透明」。用 strokeColor 画轮廓、fillColor 留空（#00000000），
+  这样悬浮球里只有笔的线条，其余像素完全透明 —— 叠在桌面/任意 App 上不会
+  出现一块实心色块。
+
+  ## 图形构成（3 条 stroke 路径）
+
+    1) 笔杆：斜置的矩形轮廓（左下 → 右上）
+    2) 笔尖分隔线：笔杆靠近笔尖那一段的横向分界
+    3) 笔尖：左下角的小三角（写下笔迹的那一头）
+
+  坐标都在 24×24 视口内，与 Android 矢量图约定一致。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- 1) 笔杆 + 笔尖外轮廓（一笔画成，闭合） -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M15.2,3.6 L20.4,8.8 L9.6,19.6 L4.4,19.6 L4.4,14.4 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="1.7" />
+
+    <!-- 2) 笔尖分隔线（笔杆与笔尖的交界） -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M13.0,5.8 L18.2,11.0"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="1.7" />
+
+    <!-- 3) 笔尖小三角（增强「这是一支笔」的可读性） -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M4.4,19.6 L4.4,14.4 L7.0,17.0 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="1.5" />
+</vector>

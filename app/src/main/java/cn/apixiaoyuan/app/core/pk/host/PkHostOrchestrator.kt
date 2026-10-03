@@ -36,6 +36,10 @@ import java.io.File
  * ## 与「App 自己的账号」的关系（串号防线）
  *
  * pk-node 的 H5 用**它自己库里的账号**发请求，靠 URL 上的 `leoAccountId` 选人。
+ *
+ * ⚠️ `leoAccountId` 是 pk-node **自己的账号主键 id**（`leo_accounts.id`），
+ *    **不是**小猿 userid —— 它内部走 `db.getLeoAccount(id)`（`WHERE id = ?`）。
+ *    这里 2026-10-03 曾误传 `yfdU`，导致 H5 每个业务请求都 404「账号不存在」。
  * 所以「PK 页用谁」这件事在**打开那一刻**就由 [h5Url] 定死，此后用户在
  * App 别处切号不会影响本页 —— 这正是 2026-10-03 修的串号问题的同类根因，
  * 换了容器之后这个性质仍然必须保住。
@@ -59,7 +63,10 @@ object PkHostOrchestrator {
          *
          * @param h5Base        pk-node 报的 H5 入口（不带账号参数）
          * @param accountCount  它库里有几个小猿账号
-         * @param leoAccountId  本次 PK 页固化的身份（小猿 userid）；null = 它库里还没有账号
+         * @param leoAccountId  ★ pk-node **库里那个账号的主键 id**（**不是**小猿 userid！）；
+         *                      null = 它库里还没有账号。
+         *                      pk-node 的 `/api/pk/h5/api` 用 `db.getLeoAccount(id)`
+         *                      （`WHERE id = ?`）选账号，所以这里必须是主键。
          * @param linked        App 的登录态是否已按 pk-node 的账号对齐
          */
         data class Ready(
@@ -185,12 +192,16 @@ object PkHostOrchestrator {
         if (hs.accounts.isEmpty()) {
             val res = PkNodeSync.syncNow(hs.adminUser, hs.adminPass)
             AppLogger.i(TAG, "自动推送登录态：${res.message}")
-            // 推完重新 handshake 一次，才能拿到刚导入的 yfdU（决定 H5 的 leoAccountId）
+            // 推完重新 handshake 一次，才能拿到刚导入账号的**主键 id**
+            // （决定 H5 的 leoAccountId）与 yfdU（灌 cookie 用）
             PkNodeLink.handshake()?.let { hs = it }
         }
 
         // 把 pk-node 的账号**导入 App 登录态**（用户要求：「管理员的小猿口算账号
         // 自动导入 app 的」）。只认第一个有 yfdU 的账号当主账号。
+        //
+        // ⚠️ `primary` 既用来**取主键**（拼 leoAccountId，见下）也用来**灌 cookie**，
+        //    两者用的字段不同：前者要 `id`，后者要 `cookieHeader`。别混。
         val primary = hs.primary
         val linked = applyAccountToSession(primary)
 
@@ -202,7 +213,29 @@ object PkHostOrchestrator {
         return State.Ready(
             h5Base = hs.h5Base ?: defaultH5Base(),
             accountCount = hs.accounts.size,
-            leoAccountId = primary?.yfdU,
+            // ★★ 2026-10-03 真 bug（用户报「PK 一直无登录态」）：
+            //
+            // 这里曾经写的是 `primary?.yfdU`。但 `yfdU` 是**小猿 userid**，
+            // 而 pk-node 的 `/api/pk/h5/api` 是这么选账号的：
+            //
+            //   const leoId = Number(u.searchParams.get('leoAccountId') || 0);
+            //   const acc = db.getLeoAccount(leoId);   // SELECT * FROM leo_accounts WHERE id = ?
+            //   if (!acc) return sendJson(res, 404, { ok: false, message: '账号不存在' });
+            //
+            // 于是 App 发 `leoAccountId=<小猿 userid>` → WHERE id = <小猿 userid> → 查不到
+            // → **每个请求都 404「账号不存在」**。
+            //
+            // 真机日志里那一串就是铁证（H5 所有业务请求全军覆没）：
+            //   api-result target=xyks.yuanfudao.com/leo-game-pk/api/math/pk/home?...
+            //              status=404 body={"ok":false,"message":"账号不存在"}
+            //
+            // 后果很迷惑人：页面框架能出来（年级还有，因为那来自桥），
+            // 但胜场/胜率/背包/活动全是空的 —— 看起来就像「没登录态」。
+            //
+            // 正确值：pk-node 自己的账号主键 `id`。它自己的网页也是用 id 拼的：
+            //   public/app.js: `frame.src = '/pk-h5/pk.html?leoAccountId=' + encodeURIComponent(id)`
+            //   而 id 来自 `<option value=String(a.id)>`（a.id = 库主键）。
+            leoAccountId = primary?.id,
             linked = linked,
         ).also { state = it }
     }
@@ -215,6 +248,8 @@ object PkHostOrchestrator {
      * 用户要求「pk-node 管理员的小猿口算账号自动导入 app」。导入后：
      *  - App 自己的功能（主页 / 练习 / 分数 / 任务）直接用这个账号，不用再手工粘 cookie；
      *  - PK H5 的 `leoAccountId` 与 App 当前身份天然一致，不再有「页面显示的号
+     *    （这里的『一致』指**同一个账号**，不是同一个数值：H5 用 pk-node 的主键，
+     *      App 侧用小猿 userid）
      *    和 App 里的号不是一个」这种困惑。
      *
      * ## 幂等
@@ -268,6 +303,7 @@ object PkHostOrchestrator {
      */
     fun h5Url(): String? {
         val r = state as? State.Ready ?: return null
+        // ★ 拼进 URL 的是 pk-node 的账号主键（见 [State.Ready.leoAccountId] 的说明）
         val id = r.leoAccountId
         return if (id != null && id > 0) {
             if (r.h5Base.contains("leoAccountId=")) r.h5Base

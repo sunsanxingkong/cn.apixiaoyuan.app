@@ -71,7 +71,11 @@ object PkRepository {
      * `window.__PK_LEO_ID`，代理按它取**该账号**的 cookie。
      * 这样 PK 页的身份在「打开那一刻」就固化下来，不受后续切号影响。
      *
-     * @param leoAccountId 小猿 userid；null = 用当前会话身份（保持旧行为）
+     * ⚠️ 本类拼的是 **pk-node 账号主键 id**（见 [cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator]），
+     *    不是小猿 userid。默认值里的 `SessionStore.yfdU` 只在**旧的 PkH5Proxy 时代**才
+     *    对得上（现在 PK 页已换成内置 node 版，主路径不走这里）。
+     *
+     * @param leoAccountId pk-node 账号主键；null = 用当前会话身份（保持旧行为）
      */
     fun pkH5Url(leoAccountId: Long? = SessionStore.pkAccountId ?: SessionStore.yfdU): String {
         val base = NetworkConfig.leoBaseUrl()

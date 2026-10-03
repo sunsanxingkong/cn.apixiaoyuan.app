@@ -11,7 +11,7 @@ import java.net.URL
  * ## 为什么需要它
  *
  * pk-node 的 H5（`/pk-h5/pk.html`）要「用某个小猿账号」登录，靠的是
- * URL 上的 `leoAccountId=<小猿 userid>`：服务端据此从它的库里挑出该账号的
+ * URL 上的 `leoAccountId=<pk-node 账号主键 id>`：服务端据此从它的库里挑出该账号的
  * cookie jar，替 H5 发所有业务请求。所以 App 必须知道**有哪些账号、userid 是多少**。
  *
  * 而 pk-node 的普通接口**刻意不返回 cookie 值**（`publicLeoAccount` 只回名字），
@@ -31,7 +31,8 @@ import java.net.URL
  *   "accounts": [
  *     { "id": 1,                    // ← **pk-node 库里的账号 id**，不是小猿 userid
  *       "name": "…",
- *       "yfdU": 1155551346,         // ← 这个才是小猿 userid（= App 侧 SessionStore.yfdU）
+ *       "yfdU": 1155551346,         // ← 小猿 userid（= App 侧 SessionStore.yfdU）
+ *                                    //    ⚠️ 拼 URL 要用上面的 "id"，不是这个
  *       "grade": 2,
  *       "deviceChainId": 3,
  *       "cookies": [ {name, value, domain, path} ],
@@ -68,7 +69,13 @@ object PkNodeLink {
         /** pk-node 库里的账号 id（**不是**小猿 userid）。 */
         val id: Long,
         val name: String?,
-        /** 小猿 userid —— 拼 `leoAccountId` 用它，也对应 App 的 `SessionStore.yfdU`。 */
+        /**
+         * ★ **小猿 userid**（对应 App 的 `SessionStore.yfdU`）。
+         *
+         * ⚠️ **不要**拿它拼 URL 的 `leoAccountId` —— 那个位置要的是本类的 [id]
+         *    （pk-node 的主键）。2026-10-03 就是因为传了 yfdU，H5 每个请求都 404
+         *    「账号不存在」（pk-node 用 `WHERE id = ?` 查）。
+         */
         val yfdU: Long?,
         val grade: Int?,
         val deviceChainId: Long?,
@@ -85,7 +92,12 @@ object PkNodeLink {
         val h5Base: String?,
         val accounts: List<Account>,
     ) {
-        /** 第一个「有 yfdU」的账号 —— 用来拼 `leoAccountId`。 */
+        /**
+         * 第一个「有 yfdU」的账号 —— 即「主账号」。
+         *
+         * 用途：① 灌 App 登录态（用它的 [Account.cookieHeader]）；
+         *      ② 拼 H5 的 `leoAccountId`（用它的 [Account.id]，**不是** yfdU）。
+         */
         val primary: Account?
             get() = accounts.firstOrNull { (it.yfdU ?: 0L) > 0L }
     }

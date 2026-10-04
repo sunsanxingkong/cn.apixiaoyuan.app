@@ -242,12 +242,20 @@ fun PkH5Screen(
                     onFinish,
                     onOpenChild,
                     exceptUrl = entryUrl,
+                    currentUrl = view?.url,
                     tag = "PkH5",
                 )
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
                 override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
                     url?.let {
-                        handleScheme(it, onFinish, onOpenChild, exceptUrl = entryUrl, tag = "PkH5")
+                        handleScheme(
+                            it,
+                            onFinish,
+                            onOpenChild,
+                            exceptUrl = entryUrl,
+                            currentUrl = view?.url,
+                            tag = "PkH5",
+                        )
                     } ?: false
             }
 
@@ -511,8 +519,50 @@ internal fun handleScheme(
     /**
      * 「当前容器自己的 URL」。命中即返回 false 放行 ——
      * 否则下级页的 `openWebView(self)` 会无限自跳（每跳一次压一个新容器）。
+     *
+     * ⚠️ 这是**兜底**。优先用 [currentUrl]（WebView 的真实当前地址）——
+     * 因为本参数是「压容器时传进来的 URL」，而页面加载后地址常被 H5 自己改写
+     * （`addLeoId` 补参数、`history.replaceState`、hash 路由），两者会对不上。
      */
     exceptUrl: String? = null,
+    /**
+     * WebView **当前真实地址**（`view.url`）。判断「是不是同一页」以它为准。
+     *
+     * ★★ 2026-10-04：这是「pk-node 没问题、App 有问题」的**结构性差异修复点**。
+     *
+     * # 差异在哪（读 pk-node 源码得到）
+     *
+     * pk-node 的 `openWebView` 是（`src/pk-h5-proxy.js:412`）：
+     * ```js
+     * local = addLeoId(toLocalH5(target));
+     * location.href = local;      // ← 同窗口导航
+     * ```
+     * 即「让**当前窗口**去这个地址」。它有两个性质：
+     *   1. **幂等** —— 重复对同一个地址执行，等于刷新当前页，不会多出任何东西；
+     *   2. 因此 H5 里任何「导航到当前页」的写法在 pk-node 里**完全无损**。
+     *
+     * App 这边为了实现原生转场，把 `openWebView` 接住改成**压新容器**
+     * （用户要求：「点击按钮 → miuix/aosp 原生转场 → 进入新 h5 容器」）。
+     * 代价是**丢掉了幂等性**：每触发一次就多一层容器。
+     *
+     * 叠加 H5 里真实存在的行为（真机日志为证）：
+     * ```
+     * 12:00:03.312 H5 请求新页面 → 开新容器：…/honor-roll.html?fromType=oralPkEntry…
+     * 12:00:08.124 H5 请求新页面 → 开新容器：  同一个 URL
+     * ```
+     * → 容器叠了两层，返回时看到的是下面那层还没渲染完的**空白页**。
+     *
+     * # 修法（即「对齐 pk-node」的正确姿势）
+     *
+     * **目标与当前容器是「同一个文档」时，不要开新容器，直接放行** ——
+     * 让它在当前 WebView 里按 `location.href` 的本义导航（= 等价于 pk-node 的行为，
+     * 也等价于浏览器的刷新）。只有**真的换页**时才压新容器（保住原生转场）。
+     *
+     * 判据必须用 **WebView 的真实 URL**，不能用压容器时传进来的那个 ——
+     * 页面加载后地址常被 H5 改写（`addLeoId` 补 `leoAccountId/pkbot/YFD_U`、
+     * `history.replaceState`），传入值与实际值对不上会漏判。
+     */
+    currentUrl: String? = null,
     tag: String = "PkH5",
 ): Boolean {
     // ★ 2026-10-04：pk-node 的 closeWebView 在 App 里发 `leo://close`
@@ -530,26 +580,20 @@ internal fun handleScheme(
 
     // 自己：放行（同文档 hash 导航 / reload）。
     //
-    // ★★ 2026-10-04 修：判据从「字符串完全相等」改成**同文档语义**（忽略 hash）。
+    // ★★ 2026-10-04：判据用**同文档语义**（忽略 hash），且**优先拿 WebView 的真实 URL**。
     //
-    // # 为什么原来会漏
+    // 见 [currentUrl] 的 KDoc：pk-node 的 openWebView 是 `location.href`（同窗口导航、
+    // 幂等），App 改成压新容器后**丢了幂等性** → H5 每触发一次就多一层容器。
+    // 只有「同文档 = 就是当前这一页」时才放行，才能既保住原生转场、又不叠容器。
     //
-    // H5 里 `location.href` 与 `openWebView` 拿到的 URL 常常**只差一个 hash**
-    // （SPA 的 `#/`、或 h5 自己 `history.replaceState` 加的参数顺序变化）。
-    // 精确比较 `url == exceptUrl` 时，`.../honor-roll.html?a=1` 与
-    // `.../honor-roll.html?a=1#/` 会被判成「不同的页面」→
-    // **宿主给它又开一个新容器** → 页面被叠成两层。
-    //
-    // 真机日志里的铁证（荣誉榜/收到的赞「返回后一片空白」的来源）：
-    // ```
-    // 12:00:03.312 H5 请求新页面 → 开新容器：…/honor-roll.html?fromType=oralPkEntry…
-    // 12:00:08.124 H5 请求新页面 → 开新容器：   （同一个 URL，又压一层）
-    // ```
-    // 叠在上面的那层还没渲染完，返回时看到的就是下面那层空白页。
-    //
-    // 同文档判据：path + query 相同即视为「同一页」，hash 不参与比较
-    // （hash 变化是页内路由，本来就不该开新容器；WebView 也确实不会为纯 hash
-    //  变化回调这里，此处只是把边界收紧）。
+    // 两个基准都比一遍（命中任一即放行）：
+    //   1. `currentUrl` —— WebView 的真实地址（**主判据**，页面被 H5 补过参数也认得）；
+    //   2. `exceptUrl`  —— 压容器时传进来的 URL（**兜底**，页面还没加载完时 view.url
+    //      可能还是 null/上一页）。
+    if (currentUrl != null && sameDocument(url, currentUrl)) {
+        AppLogger.d(tag, "同文档导航，放行（不开新容器）：$url")
+        return false
+    }
     if (exceptUrl != null && sameDocument(url, exceptUrl)) return false
     // ★ 「新的 H5 页面」→ 由 App 导航开新容器（原生转场 + 预测性返回）。
     //   判据：本机同源下的**另一个文档**（PK H5 页面都在 /pk-h5 或 /pk-h5-cdn）。

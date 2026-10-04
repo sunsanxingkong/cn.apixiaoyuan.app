@@ -181,6 +181,7 @@ fun PkH5ChildScreen(
                     onFinish = { navController.popBackStack() },
                     onOpenChild = openChildInNewContainer,
                     exceptUrl = url,
+                    currentUrl = view?.url,
                     tag = "PkH5Child",
                 )
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
@@ -191,6 +192,7 @@ fun PkH5ChildScreen(
                             onFinish = { navController.popBackStack() },
                             onOpenChild = openChildInNewContainer,
                             exceptUrl = url,
+                            currentUrl = view?.url,
                             tag = "PkH5Child",
                         )
                     } ?: false

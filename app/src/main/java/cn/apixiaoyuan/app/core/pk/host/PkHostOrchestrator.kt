@@ -439,10 +439,18 @@ object PkHostOrchestrator {
         if (!base.contains("pkbot=")) {
             sb.append("&pkbot=").append(pkbotParam())
         }
+        // ⚠️ 刻意**不**在 App 侧传 `sbh`。
+        //
+        // 理由：App 容器已经在 `PkH5Screen` 里给 WebView 留了 `statusBarTopDp()`
+        // （≈152px）的顶部空白；而 H5 拿到 `getImmerseStatusBarHeight` 后
+        // **自己还会再留一次** → 双重留白。
+        //
+        // pk-node 侧已支持「宿主传了就生效、没传就回 0」，所以这里不传即可
+        // 保持现状（与之前一致，不会回归）；哪天决定「由 H5 自己处理沉浸式」，
+        // 只要把 App 的 padding 去掉、并在这里补 `&sbh=<px>` 就行。
         sb.append("&t=").append(System.currentTimeMillis())
         return sb.toString()
     }
-
     /**
      * 三个自动能力 → `pkbot` 参数（与 pk-node 的 `openPkPage` 逐字一致）。
      *

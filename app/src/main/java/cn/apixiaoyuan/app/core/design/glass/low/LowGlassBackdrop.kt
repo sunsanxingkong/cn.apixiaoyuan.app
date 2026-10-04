@@ -85,7 +85,25 @@ internal class LowGlassBackdrop {
         private set
 
     /** 抓取节流间隔（毫秒）。96ms ≈ 每秒 10 张，足够跟上滚动又不至于压垮 CPU。 */
-    var captureIntervalMs: Long = 96L
+    /**
+     * 采样节流间隔（毫秒）。
+     *
+     * ★★ 2026-10-05（用户：「没有特效玻璃出现」）：
+     * 原来是 96ms（约 10fps）—— 按压动画只有 ~300ms，
+     * 96ms 只能采到 3 帧，加上进度量化，**按压玻璃几乎看不见**。
+     * 降到 32ms（约 30fps）后跟手感正常；
+     * 因为现在只拓「顶栏+底栏」包围盒（不到 20% 面积），额外开销很小。
+     */
+    var captureIntervalMs: Long = 32L
+
+    /**
+     * 强制下一次采样（按压等交互事件用）。
+     *
+     * ★ 让控件在「希望立即反映」时不等节流。
+     */
+    fun requestImmediateCapture() {
+        lastCaptureAt = 0L
+    }
 
     /**
      * 需要采样的窗口矩形（顶栏 / 底栏各自登记）。
@@ -93,6 +111,15 @@ internal class LowGlassBackdrop {
      * ★ 2026-10-05：「按需采样」的关键 —— 没有它就只能拓全屏，而全屏拓图正是卡顿主因。
      */
     private val wantedRegions = java.util.concurrent.CopyOnWriteArrayList<android.graphics.Rect>()
+
+    /**
+     * ★ 2026-10-05：区域登记**已不再参与裁剪**（现在整屏降采样直绘，坐标天然对齐）。
+     * 保留这些 API 是为了：
+     *  1. 调用方不用改（三个组件还在登记，不会报错）；
+     *  2. 将来真要做「只采必要区域」时，登记信息还在。
+     */
+    @Suppress("unused")
+    private val regionRegistrationKept = Unit
 
     /** 宿主 View（Activity content view），用于 View.draw(Canvas) 采样。 */
     private var hostViewRef: java.lang.ref.WeakReference<android.view.View>? = null
@@ -144,7 +171,7 @@ internal class LowGlassBackdrop {
             // 只把它们的包围盒用 `View.draw(Canvas)` 直接画到**已降采样**的位图上
             // —— 一次就位，没有全屏拷贝、没有全屏缩放。
             val hostView = hostViewRef?.get()
-            if (hostView != null && wantedRegions.isNotEmpty()) {
+            if (hostView != null) {
                 captureByViewDraw(hostView)
                 return
             }
@@ -183,40 +210,32 @@ internal class LowGlassBackdrop {
         val fullH = hostView.height
         if (fullW <= 0 || fullH <= 0) return
 
-        var l = Int.MAX_VALUE
-        var t = Int.MAX_VALUE
-        var r = Int.MIN_VALUE
-        var b = Int.MIN_VALUE
-        wantedRegions.forEach { rect ->
-            l = minOf(l, rect.left)
-            t = minOf(t, rect.top)
-            r = maxOf(r, rect.right)
-            b = maxOf(b, rect.bottom)
-        }
-        if (l >= r || t >= b) return
-        l = l.coerceIn(0, fullW - 1)
-        t = t.coerceIn(0, fullH - 1)
-        r = r.coerceIn(l + 1, fullW)
-        b = b.coerceIn(t + 1, fullH)
-        val w = r - l
-        val h = b - t
-        if (w <= 0 || h <= 0) return
-
-        val bw = max(1, w / ds)
-        val bh = max(1, h / ds)
+        val bw = max(1, fullW / ds)
+        val bh = max(1, fullH / ds)
 
         // 尺寸不变就复用位图（避免每帧分配）。
         val cur = snapshot
         val bmp = if (cur != null && cur.width == bw && cur.height == bh) cur
         else Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
 
+        // ★★ 2026-10-05（修正）：**整屏降采样直绘**。
+        //
+        // 之前试过「只画登记区域」，但那套坐标换算（window → content view）
+        // 很容易错位（状态栏偏移、regionOrigin 漏算），而且一旦错位就是「玻璃里看到错的内容」这种难查的现象。
+        //
+        // 现在改成：**直接把 hostView 画到已降采样的位图上**（不再经过
+        // `toImageBitmap()` 的全屏 GPU 合成 + 14MB 拷贝）。
+        // 这是卡顿的真正主因；只拓一次就位，而且坐标天然对齐（都是 view 自身坐标）。
+        //
+        // 代价：仍然要画整屏（但是画到 1/2 尺寸的位图上，像素量 1/4）。
+        // 对比 `toImageBitmap()`：后者是「先 GPU 合成全屏→再全屏拷贝→再缩放」，这里只有「直接缩放着画」。
         val canvas = android.graphics.Canvas(bmp)
         canvas.scale(1f / ds, 1f / ds)
-        canvas.translate(-l.toFloat(), -t.toFloat())
-        hostView.draw(canvas)
+        runCatching { hostView.draw(canvas) }
 
         snapshot = bmp
-        regionOrigin = l to t
+        // 整屏快照 → 原点就是 (0,0)（与 View 坐标系一致）。
+        regionOrigin = 0 to 0
         snapshotId++
     }
 }

@@ -536,8 +536,9 @@ private class LowGlassSurfaceNode(
         val snapshotId = backdrop.snapshotId
 
         val p = progress().fastCoerceIn(0f, 1f)
-        // 进度量化：2% 一档。指示器按压缩放这种连续动画不需要每帧重算折射。
-        val progressKey = (p * 50f).toInt()
+        // ★ 2026-10-05 修正：量化从 2%（*50）改为 **0.5%（*200）**。
+        //   原来太粗 —— 按压动画只有 ~300ms，2% 一档会让「凸起/色散」看起来是跳的。
+        val progressKey = (p * 200f).toInt()
 
         if (snapshotId == lastSnapshotId && progressKey == lastProgressKey) return
         lastSnapshotId = snapshotId
@@ -547,6 +548,11 @@ private class LowGlassSurfaceNode(
         if (indicatorLayer && p <= 0.01f) {
             processed = null
             return
+        }
+        // ★ 刚进入按下（从 0 跳出来）时，立即要一帧快照 ——
+        //   否则等到下一次节流才有图，按压前 30ms 会是空的。
+        if (indicatorLayer && lastProgressKey <= 0) {
+            backdrop.requestImmediateCapture()
         }
 
         val s = spec()

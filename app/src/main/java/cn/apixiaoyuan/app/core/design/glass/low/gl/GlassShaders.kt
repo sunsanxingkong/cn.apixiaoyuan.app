@@ -412,6 +412,49 @@ void main() {
 """
 
     /**
+     * 饱和度/亮度调整 —— **`miuix-blur` 的 `vibrancy()` 的 GL 等价实现**。
+     *
+     * # 为什么这个很重要（用户：「离高版本的底栏还差得远」）
+     *
+     * 高版本的效果链是 **`vibrancy() -> blur() -> lens()`**（顺序不能反）。
+     * 其中 `vibrancy()` 在 miuix 里就是：
+     *
+     * ```kotlin
+     * colorControls(brightness = 0f, contrast = 1f, saturation = 1.5f)
+     * ```
+     *
+     * 它把背景的**饱和度拉高 50%** —— 效果是：
+     * 玻璃后面的内容看起来更「鲜」、更透亮，不会因为模糊而发灰，
+     * 这正是 Apple 液态玻璃「透而不浊」的关键。
+     * **少了它，玻璃会明显“发灰”。**
+     *
+     * # 实现
+     *
+     * 标准的饱和度矩阵（用 Rec.709 亮度权重，与 Skia 的 `colorMatrix` 同口径）：
+     * ```
+     * R' = (1-s)*L + s*R      L = 0.2126R + 0.7152G + 0.0722B
+     * ```
+     *
+     * 并且按高版本的参数，brightness/contrast 保持中性（不变）。
+     */
+    val VIBRANCY = """
+$PRECISION
+$COMMON
+
+uniform sampler2D uContent;
+uniform float uSaturation;
+
+void main() {
+    vec2 coord = toTopLeftCoord();
+    vec4 c = evalContent(uContent, coord);
+    // Rec.709 亮度（与 Skia ColorMatrix 的 luminance 权重一致）。
+    float l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    c.rgb = vec3(l) + uSaturation * (c.rgb - vec3(l));
+    gl_FragColor = c;
+}
+"""
+
+    /**
      * 混色（提亮）—— 对应 miuix-blur 的 `BlurDefaults.blurColors(blendColors = [...])`。
      *
      * 顶栏的 `blendColors` 是「主题 surface 30% 透明度」，作用是

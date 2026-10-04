@@ -65,6 +65,13 @@ internal object LowGlassPipeline {
         var chromaticAberration: Float = 0f,
         /** 四角半径（px，左上/右上/右下/左下）—— 对应 `cornerRadii` */
         var cornerRadii: FloatArray = FloatArray(4) { 9999f },
+        /**
+         * 饱和度（`vibrancy()`）—— 高版本效果链的**第一步**。
+         *
+         * 高版本固定为 **1.5**（`colorControls(saturation = 1.5f)`）；
+         * 1.0 = 不变。默认 1.5 与高版本一致。
+         */
+        var saturation: Float = 1.5f,
     )
 
     /**
@@ -209,7 +216,19 @@ internal object LowGlassPipeline {
             val w = src.width.toFloat()
             val h = src.height.toFloat()
 
-            // ---- ①② 模糊（可分离两趟）----
+            // ---- ① vibrancy（饱和度）—— **必须在模糊之前** ----
+            //
+            // 高版本的顺序是 `vibrancy() -> blur() -> lens()`（见 LiquidGlassTabBar）。
+            // 用户反馈「离高版本的底栏还差得远」—— 少的就是这一步：
+            // 没有它，玻璃会因为模糊而发灰，而高版本是透亮的。
+            if (spec.saturation != 1.0f) {
+                passes += GlGlassRenderer.Pass(
+                    GlassShaders.VIBRANCY,
+                    mapOf("uSaturation" to floatArrayOf(spec.saturation)),
+                )
+            }
+
+            // ---- ②③ 模糊（可分离两趟）----
             if (spec.blurRadiusPx > 0.5f) {
                 val texel = floatArrayOf(1f / w, 1f / h)
                 val r = floatArrayOf(spec.blurRadiusPx)
@@ -293,6 +312,7 @@ internal object LowGlassPipeline {
             depthEffect = spec.depthEffect,
             chromaticAberration = spec.chromaticAberration,
             cornerRadii = FloatArray(4) { spec.cornerRadii[it].coerceAtMost(maxRadius) / ds },
+            saturation = spec.saturation,
         )
         return render(context, cropped, scaled)
     }

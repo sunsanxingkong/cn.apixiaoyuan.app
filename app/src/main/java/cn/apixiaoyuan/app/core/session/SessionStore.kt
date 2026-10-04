@@ -480,13 +480,48 @@ object SessionStore {
         //
         //     重拉 → saveCurrentUserInfo → bump → 重拉 → …
         //
-        // 只要昵称/头像没变就直接返回，环即断开。这是必要的修复，而非优化。
-        if (currentNickname == nickname && currentAvatarUrl == avatarUrl) return
+        // 只要昵称/头像没变就直接返回，环即断开。
+        val n = currentNickname
+        val a = currentAvatarUrl
+        if (n == nickname && a == avatarUrl) return
         prefs().edit()
             .putString(KEY_NICKNAME, nickname)
             .putString(KEY_AVATAR, avatarUrl)
             .apply()
-        bump()
+        // ★★ 2026-10-04：**不再 bump()** —— 这是「无限轮询」的最终真因。
+        //
+        // ## 症状（真机铁证）
+        //
+        // 三个接口每 ~0.53s 一轮、从开机跑到关机，一天两万多次：
+        //
+        //     GET /profile/android/user-info              （refreshCurrentUserProfile）
+        //     GET /leo-profile/api/user-infos/context     （fetchSubAccounts 第一步）
+        //     GET /leo-profile/android/user-infos/batchGet（fetchSubAccounts 第二步）
+        //
+        // 上面那个「昵称/头像没变就返回」的守卫**拦不住**，因为这条链路上有
+        // **两个不同来源在轮流覆写同一份值**：
+        //
+        //   ① 账号域 `/profile/android/user-info` → `avatarUrl` 是
+        //      `https://leo-online.fbcontent.cn/leo-gallery/<avatarId>`（完整 URL）；
+        //   ② 主域 `batchGet` 的 `UserVO` → `avatarUrl` 是它自己的那份值。
+        //
+        // 两者只要有一个字符不同，值就每轮都在 A→B→A 之间来回翻 →
+        // 守卫永不命中 → 每轮都 bump → 每轮都重拉 → **永动**。
+        //
+        // ## 为什么能安全去掉 bump
+        //
+        // `stateRevision` 全项目唯一的消费者是 `HomeViewModel` 的
+        // `snapshotFlow { stateRevision } → refreshAccounts()`，语义是
+        // **「登录的是谁变了，重拉账号列表」**（登录/登出/切号/导入 cookie）。
+        //
+        // 而「昵称/头像」**不是身份**：全项目读它的只有两处，都是**按需一次性读**、
+        // 不依赖重组 ——
+        //   · `PkNodeSync`（把账号名推给 pk-node，联动时读一次）；
+        //   · `PkWebViewBridge.getUserInfo`（H5 调桥时现读现返回）。
+        // 没有任何 Compose UI 依赖它，所以「值变了要通知 UI 重组」这个需求不存在。
+        //
+        // 身份变化（userid 变）由 [saveCookies] / [saveYfdU] 自己 bump，
+        // 与本方法无关 —— 那两处的 bump 保留。
     }
 
     /** 是否已登录：`userid` cookie 存在即视为已登录。

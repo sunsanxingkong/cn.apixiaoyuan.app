@@ -75,11 +75,30 @@ object LaunchManifest {
     /**
      * 清单地址。
      *
-     * 当前指向 pk-node 仓库的静态站（GitHub Pages）。
-     * 要改到 Cloudflare Pages 时**只改这一行**，其余代码不用动 ——
-     * 因为两份产物是完全相同的静态文件（见 `LAUNCH-MANIFEST.md`）。
+     * 当前指向 pk-node 的 Cloudflare Pages 站点。
+     *
+     * ## 为什么用 Pages 而不是 GitHub Pages
+     *
+     * 用户明确要求（2026-10-04）：
+     * > 「还是用 cloudflare 部署吧，github 有时候过内访问不了」
+     *
+     * `sxd91.github.io` 在**国内网络下不稳定**（时通时不通），而这份清单是
+     * 「打不开 App 时才需要」的兜底通道 —— 它在最需要的时候恰恰不能掉链子。
+     * Cloudflare 的 `pages.dev` 域名在国内可达性明显更好（同一个站点的
+     * 代理 function 就是为绕开 `workers.dev` 被阻断而加的，实测可用）。
+     *
+     * ## 与 PK H5 的关系（放心：不会互相影响）
+     *
+     * 同一个 Pages 项目（`pk-node`）里还有一条**代理 function**（把全部路径转发到 Worker）。
+     * 本文件在 `_routes.json` 的 `exclude` 里，**由静态资源直出、不进 function** ——
+     * 所以两条互不干扰（部署后实测：`/relay.json` 200 返回 JSON，
+     * `/` 仍 200 返回管理后台页面）。
+     *
+     * ## 切换成本
+     *
+     * 两份产物是完全相同的静态文件，所以换地址**只改这一行**。
      */
-    private const val MANIFEST_URL = "https://sxd91.github.io/pk-node/relay.json"
+    private const val MANIFEST_URL = "https://pk-node.pages.dev/relay.json"
 
     /** 字段名：控制本次是否继续启动。 */
     private const val KEY_RELAY = "relay"

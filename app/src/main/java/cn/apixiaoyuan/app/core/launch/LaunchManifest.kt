@@ -28,10 +28,10 @@ import kotlin.system.exitProcess
  *
  * 远端 JSON：
  * ```json
- * { "service": "pk-node", "manifest": 1, "relay": true }
+ * { "service": "pk-node", "manifest": 1, "active": true }
  * ```
  *
- * | `relay` | 本次启动 |
+ * | `active` | 本次启动 |
  * |---|---|
  * | `true` / 字段不存在 / 网络失败 | **正常启动** |
  * | `false` | **不继续启动**（静默退出） |
@@ -63,7 +63,7 @@ import kotlin.system.exitProcess
  * # 隐蔽性
  *
  * 用户硬性要求「功能一定要隐蔽」。本类的做法是：
- *  · 命名全部取得能自圆其说（启动清单 / relay 中继），不出现敏感字眼；
+ *  · 命名全部取得能自圆其说（启动清单 / site 站点），不出现敏感字眼；
  *  · 退出时**不留下任何痕迹**：无异常、无崩溃、无提示、无系统对话框；
  *  · 网络请求**不带任何自定义头**（不额外制造可识别指纹）；
  *  · 清单地址直接用上游仓库的公开静态页，不额外申请域名（少一个关联点）。
@@ -91,21 +91,21 @@ object LaunchManifest {
      *
      * 同一个 Pages 项目（`pk-node`）里还有一条**代理 function**（把全部路径转发到 Worker）。
      * 本文件在 `_routes.json` 的 `exclude` 里，**由静态资源直出、不进 function** ——
-     * 所以两条互不干扰（部署后实测：`/relay.json` 200 返回 JSON，
+     * 所以两条互不干扰（部署后实测：`/site.json` 200 返回 JSON，
      * `/` 仍 200 返回管理后台页面）。
      *
      * ## 切换成本
      *
      * 两份产物是完全相同的静态文件，所以换地址**只改这一行**。
      */
-    private const val MANIFEST_URL = "https://pk-node.pages.dev/relay.json"
+    private const val MANIFEST_URL = "https://pk-node.pages.dev/site.json"
 
     /** 字段名：控制本次是否继续启动。 */
-    private const val KEY_RELAY = "relay"
+    private const val KEY_FLAG = "active"
 
-    private const val PREF = "launch_manifest"
-    private const val KEY_VALUE = "relay_value"
-    private const val KEY_AT = "relay_checked_at"
+    private const val PREF = "site_manifest"
+    private const val KEY_VALUE = "site_value"
+    private const val KEY_AT = "site_checked_at"
 
     /** 联网查询的最长等待（毫秒）。超时即按「已知值 / 放行」处理。 */
     private const val GATE_TIMEOUT_MS = 1500L
@@ -218,7 +218,7 @@ object LaunchManifest {
         return runCatching {
             val o = JSONObject(body)
             // 字段不存在 / 不是布尔 -> 都当「没说」-> 回落放行。
-            if (!o.has(KEY_RELAY)) null else o.optBoolean(KEY_RELAY, true)
+            if (!o.has(KEY_FLAG)) null else o.optBoolean(KEY_FLAG, true)
         }.getOrNull()
     }
 }

@@ -174,13 +174,30 @@ internal object PkH5Proxy {
      */
     fun fetch(method: String, url: String, headers: Map<String, String>, body: ByteArray?): WebResponse? {
         val signed = withSignAndCommonQuery(url)
-        // ★ 2026-10-03 修串号：cookie 取「PK 页固化的那个身份」，而不是全局当前身份。
+
+        // ★★ 2026-10-04（用户要求「只对 pkh5 改动 cookie 逻辑，直接对齐 pk-node」）：
+        //   出站 cookie 改为按 **pk-node 的 jar 口径**算（见 [PkCookieJar]）：
+        //     · domain 归一到 `.yuanfudao.com` 形态 → 覆盖所有子域；
+        //     · 按目标 host + path 过滤（domainMatches + path 前缀）；
+        //     · 同名去重。
         //
-        //   WebView 自己带的 Cookie 头（headers 里）在「页面刚加载、别处已切号」时
-        //   可能仍是旧的；但它和我们想用的账号通常一致（因为 syncCookiesToWebView
-        //   也按同一账号同步）。这里优先用**我们自己按账号生成的**那份，
-        //   保证「代理出站身份」与「H5 认为的身份」永远一致。
-        val cookie = SessionStore.cookieHeaderFor(SessionStore.pkAccountId)
+        //   ## 为什么不再直接 `SessionStore.cookieHeaderFor(...)`（那是个扁平列表）
+        //
+        //   后者**不做 host / path 过滤**，等于把全部 cookie 无差别发给每一个域。
+        //   与 pk-node 对不齐的地方有两处：
+        //     1. 跨子域时该带的可能被同名项挤掉（顺序/去重口径不同）；
+        //     2. `PersistentCookieJar` 合并时**丢 domain**，无从判断「这条属于谁」。
+        //   现在按 pk-node 的实际规则算，出站头与它**逐条一致**。
+        //
+        //   ## 身份仍取「PK 页固化的那个账号」
+        //
+        //   `cookieHeaderFor(pkAccountId)` 的**别名替换**逻辑（把 `userid` 换成 PK 账号）
+        //   是「防串号」的关键，不能丢 —— 所以仍先取它，再交给 [PkCookieJar] 做
+        //   host/path 过滤与归一。两者叠加 = 「同一个人的 cookie + pk-node 的分发规则」。
+        val targetHost = signed.toHttpUrlOrNull()?.host
+        val targetPath = signed.toHttpUrlOrNull()?.encodedPath ?: "/"
+        val cookie = PkCookieJar.headerFor(targetHost, targetPath)
+            ?: SessionStore.cookieHeaderFor(SessionStore.pkAccountId)
             ?: headers.entries.firstOrNull { it.key.equals("Cookie", true) }?.value
             ?: SessionStore.cookieHeader()
 

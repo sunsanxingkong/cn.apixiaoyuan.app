@@ -87,6 +87,34 @@ internal class LowGlassBackdrop {
     /** 抓取节流间隔（毫秒）。96ms ≈ 每秒 10 张，足够跟上滚动又不至于压垮 CPU。 */
     var captureIntervalMs: Long = 96L
 
+    /**
+     * 需要采样的窗口矩形（顶栏 / 底栏各自登记）。
+     *
+     * ★ 2026-10-05：「按需采样」的关键 —— 没有它就只能拓全屏，而全屏拓图正是卡顿主因。
+     */
+    private val wantedRegions = java.util.concurrent.CopyOnWriteArrayList<android.graphics.Rect>()
+
+    /** 宿主 View（Activity content view），用于 View.draw(Canvas) 采样。 */
+    private var hostViewRef: java.lang.ref.WeakReference<android.view.View>? = null
+
+    /** 快照左上角在宿主坐标系里的位置（px）。裁剪时要减去它。 */
+    var regionOrigin: Pair<Int, Int> = 0 to 0
+        private set
+
+    /** 登记一个需要采样的窗口矩形。 */
+    fun requestRegion(rect: android.graphics.Rect?) {
+        if (rect == null) return
+        if (wantedRegions.none { it == rect }) wantedRegions.add(android.graphics.Rect(rect))
+    }
+
+    /** 清空登记。 */
+    fun clearRegions() = wantedRegions.clear()
+
+    /** 绑定宿主 View。 */
+    fun bindHostView(v: android.view.View?) {
+        hostViewRef = if (v == null) null else java.lang.ref.WeakReference(v)
+    }
+
     /** 降采样因子（≥1）。抓到的全尺寸位图会缩到 `1/downscale` 再交给管线。 */
     var downscale: Int = 2
 
@@ -106,30 +134,90 @@ internal class LowGlassBackdrop {
         capturing = true
         lastCaptureAt = now
         try {
+            // ★★ 2026-10-05（治卡顿）：按「需要的区域」采样。
+            //
+            // 旧做法：每次 `toImageBitmap()` 抓**整屏**（1280x2772 ≈ 14MB）再缩。
+            //   ① 每帧全屏 GPU 合成 + 全屏内存拷贝（最贵）；② 缩放又一次全屏重采样；
+            //   ③ 而我们真正需要的只有「顶栏 + 底栏」两条窄条（不到 20% 面积）。
+            //
+            // 新做法：折射方先登记需要的窗口矩形（[requestRegion]），
+            // 只把它们的包围盒用 `View.draw(Canvas)` 直接画到**已降采样**的位图上
+            // —— 一次就位，没有全屏拷贝、没有全屏缩放。
+            val hostView = hostViewRef?.get()
+            if (hostView != null && wantedRegions.isNotEmpty()) {
+                captureByViewDraw(hostView)
+                return
+            }
+
+            // ── 兜底：没有 hostView 时回到原来的全屏抓取。
             val image = l.toImageBitmap()
             val full = image.asAndroidBitmap()
             if (full.width <= 0 || full.height <= 0) return
-
             val ds = downscale.coerceAtLeast(1)
             val bw = max(1, full.width / ds)
             val bh = max(1, full.height / ds)
             val scaled = if (bw != full.width || bh != full.height) {
-                // ★ createScaledBitmap 会继承源格式；而 GPU 上传（GLUtils.texImage2D）
-                //   只接受 ARGB_8888 / RGB_565。所以这里直接产出 ARGB_8888，
-                //   免得后面还要再 copy 一次。
                 Bitmap.createScaledBitmap(full, bw, bh, true)
                     .let { if (it.config == Bitmap.Config.ARGB_8888) it else it.copy(Bitmap.Config.ARGB_8888, false) }
             } else {
                 if (full.config == Bitmap.Config.ARGB_8888) full else full.copy(Bitmap.Config.ARGB_8888, false)
             }
             snapshot = scaled
+            regionOrigin = 0 to 0
             snapshotId++
         } catch (t: Throwable) {
-            // 抓取失败不是致命错误：玻璃层会用上一次的快照 / 纯色回退。
             AppLogger.w("LowGlass", "背景快照失败：${t.message}")
         } finally {
             capturing = false
         }
+    }
+
+    /**
+     * 只把「登记的区域」画到降采样位图上。
+     *
+     * 顶栏 + 底栏合计不到屏幕 20% 面积 —— 这是卡顿的根治。
+     */
+    private fun captureByViewDraw(hostView: android.view.View) {
+        val ds = downscale.coerceAtLeast(1)
+        val fullW = hostView.width
+        val fullH = hostView.height
+        if (fullW <= 0 || fullH <= 0) return
+
+        var l = Int.MAX_VALUE
+        var t = Int.MAX_VALUE
+        var r = Int.MIN_VALUE
+        var b = Int.MIN_VALUE
+        wantedRegions.forEach { rect ->
+            l = minOf(l, rect.left)
+            t = minOf(t, rect.top)
+            r = maxOf(r, rect.right)
+            b = maxOf(b, rect.bottom)
+        }
+        if (l >= r || t >= b) return
+        l = l.coerceIn(0, fullW - 1)
+        t = t.coerceIn(0, fullH - 1)
+        r = r.coerceIn(l + 1, fullW)
+        b = b.coerceIn(t + 1, fullH)
+        val w = r - l
+        val h = b - t
+        if (w <= 0 || h <= 0) return
+
+        val bw = max(1, w / ds)
+        val bh = max(1, h / ds)
+
+        // 尺寸不变就复用位图（避免每帧分配）。
+        val cur = snapshot
+        val bmp = if (cur != null && cur.width == bw && cur.height == bh) cur
+        else Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+
+        val canvas = android.graphics.Canvas(bmp)
+        canvas.scale(1f / ds, 1f / ds)
+        canvas.translate(-l.toFloat(), -t.toFloat())
+        hostView.draw(canvas)
+
+        snapshot = bmp
+        regionOrigin = l to t
+        snapshotId++
     }
 }
 

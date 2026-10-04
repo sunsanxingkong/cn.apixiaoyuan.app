@@ -89,7 +89,20 @@ internal fun LowBlurredTopBar(
     val overhang = 28.dp
     val context = LocalContext.current
 
-    Box(modifier.fillMaxWidth()) {
+    Box(
+        modifier
+            .fillMaxWidth()
+            // ★ 2026-10-05（治卡顿）：登记「顶栏 + overhang」这块区域，
+            // 采样器只拓它 + 底栏的包围盒（远小于全屏）。
+            .onGloballyPositioned { coords ->
+                val b = coords.boundsInWindow()
+                backdrop.requestRegion(
+                    android.graphics.Rect(
+                        b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt(),
+                    )
+                )
+            },
+    ) {
         // 模糊层：铺满「顶栏 + overhang」，背景是渐变模糊后的内容。
         Box(
             Modifier

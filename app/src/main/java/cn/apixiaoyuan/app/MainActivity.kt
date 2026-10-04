@@ -261,6 +261,13 @@ private fun LowPagerWithGlassBar(
 ) {
     val lowBackdrop = rememberLowGlassBackdrop()
 
+    // ★ 2026-10-05：绑定宿主 View —— 采样器用 `View.draw(Canvas)` 只拓「需要的区域」，
+    // 而不是每帧全屏 `toImageBitmap()`（那是卡顿主因）。
+    val hostView = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.LaunchedEffect(hostView) {
+        lowBackdrop.bindHostView(hostView)
+    }
+
     androidx.compose.runtime.LaunchedEffect(lowBackdrop, pagerState) {
         while (true) {
             lowBackdrop.capture()
@@ -288,6 +295,14 @@ private fun LowPagerWithGlassBar(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = barBottomPadding),
+            // ★★ 2026-10-05（用户：「低版本应该也可以使用非液态玻璃的底栏效果」）：
+            // 把设置里的底栏三态真正传进去（与高版本同一套枚举）。
+            mode = when {
+                cn.apixiaoyuan.app.core.design.glass.GlassBackend.noGlassAtAll -> TabBarMode.None
+                ThemePrefs.bottomBarMode == ThemePrefs.BottomBarMode.LIQUID_GLASS -> TabBarMode.LiquidGlass
+                ThemePrefs.bottomBarMode == ThemePrefs.BottomBarMode.FROSTED -> TabBarMode.Blur
+                else -> TabBarMode.None
+            },
         )
     }
 }

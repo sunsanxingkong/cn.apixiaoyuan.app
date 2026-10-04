@@ -106,7 +106,20 @@ object NodeRuntime {
      * 所以必须显式列出，否则连 `libc.so` 都找不到。
      */
     private fun libPath(ctx: Context): String =
-        ctx.applicationInfo.nativeLibraryDir + ":/system/lib64"
+        nativeLibDir(ctx) + ":/system/lib64"
+
+    /**
+     * 纯 nativeLibraryDir（**不带** `:/system/lib64` 后缀）。
+     *
+     * ★★ 2026-10-05 真机修正：`PK_NATIVE_LIB_DIR` 原先传的是 [libPath]（含冒号分隔的两段），
+     * pk-node 里 `path.join(该值, 'libcloudflared.so')` 会拼出
+     * `/data/app/.../lib/arm64:/system/lib64/libcloudflared.so` —— **路径无效，必然找不到**，
+     * 于是又回落去执行 `files/bin/cloudflared` 并继续报 EACCES。
+     *
+     * 环境变量里给「单个目录」，需要多目录的场合（`LD_LIBRARY_PATH`）才用 [libPath]。
+     */
+    private fun nativeLibDir(ctx: Context): String =
+        ctx.applicationInfo.nativeLibraryDir
 
     /**
      * 启动内置服务。幂等 —— 已在跑就直接返回 true。
@@ -150,7 +163,7 @@ object NodeRuntime {
                 // 而 nativeLibraryDir 是 apk_data_file，可执行（内置 node 就是这么跑的）。
                 // 所以 cloudflared 被打包成 libcloudflared.so 放进 jniLibs，
                 // 安装后落在这个目录。
-                put("PK_NATIVE_LIB_DIR", libPath(ctx))
+                put("PK_NATIVE_LIB_DIR", nativeLibDir(ctx))
                 // 跳过 arm64 native 自检：那些 so 在 App 环境下加载不了；
                 // sign 与内容编码都已是纯 JS（见 pk-node 的 src/native.js）。
                 put("PK_SKIP_NATIVE", "1")

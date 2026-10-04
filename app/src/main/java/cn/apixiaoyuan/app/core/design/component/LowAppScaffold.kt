@@ -57,6 +57,29 @@ internal fun LowAppScaffold(
 ) {
     val backdrop = rememberLowGlassBackdrop()
 
+    // ★★ 2026-10-05（用户：「顶部 scaffold 没有渲染效果啊（在低版本管线）」）：
+    //
+    // **根因**：[backdrop] 只是个「录制容器」，必须有人**定期把图层抓成位图**
+    // （[LowGlassBackdrop.capture]）供顶栏模糊采样。上一版只在 MainActivity 的
+    // `LowPagerWithGlassBar` 里挂了采样泵 —— 而 `AppScaffold` 是**二级页**用的，
+    // 它的 backdrop **从来没有被 capture 过** ⇒ `snapshot` 恒为 null
+    // ⇒ 顶栏模糊层永远走「没有位图就不画」分支 ⇒ **顶栏完全没有效果**。
+    //
+    // 现在这里自己挂一个泵（内部有节流，静止时几乎不耗电）。
+    // ★ 2026-10-05：绑定宿主 View —— 采样器用 View.draw(Canvas) 只拓「需要的区域」。
+    //   不绑定的话只能回落全屏 toImageBitmap()，卡顿依旧。
+    val hostView = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.LaunchedEffect(hostView, backdrop) {
+        backdrop.bindHostView(hostView)
+    }
+
+    androidx.compose.runtime.LaunchedEffect(backdrop) {
+        while (true) {
+            backdrop.capture()
+            kotlinx.coroutines.delay(80L)
+        }
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = surfaceColor,

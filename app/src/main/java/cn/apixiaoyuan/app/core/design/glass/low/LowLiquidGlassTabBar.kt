@@ -6,6 +6,7 @@ import android.graphics.Rect
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -138,8 +140,21 @@ internal fun LowLiquidGlassTabBar(
     contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
     activeContentColor: Color = MaterialTheme.colorScheme.primary,
     liquidGlassBlurRadius: Dp = 4.dp,
+    /**
+     * 底栏渲染模式（与高版本 TabBarMode 同语义）。
+     *
+     * 2026-10-05（用户要求低版本也能用非液态玻璃的底栏效果）：
+     *  - LiquidGlass：模糊 + 折射
+     *  - Blur：只模糊（更省电、更流畅）
+     *  - None：纯色（不采样背景，低端机保底）
+     */
+    mode: cn.apixiaoyuan.app.core.design.glass.TabBarMode =
+        cn.apixiaoyuan.app.core.design.glass.TabBarMode.LiquidGlass,
 ) {
     if (items.isEmpty()) return
+
+    val isLiquidGlassMode = mode == cn.apixiaoyuan.app.core.design.glass.TabBarMode.LiquidGlass
+    val isBlurMode = mode == cn.apixiaoyuan.app.core.design.glass.TabBarMode.Blur
 
     val pillShape = remember { CircleShape }
     val glassTint = containerColor.copy(alpha = 0.4f)
@@ -350,6 +365,24 @@ internal fun LowLiquidGlassTabBar(
         // ================= 选中指示器（深度折射 + 色散） =================
         if (tabWidthPx > 0f) {
             val tabWidthDp = with(density) { tabWidthPx.toDp() }
+            // ★★ 2026-10-05（用户：「特效玻璃指的是按压后出现的玻璃」）：
+            // 按压时指示器才出液态玻璃（高版本的 lens 也是随 pressProgress 渐入）；
+            // 毛玻璃 / 纯色模式下用普通半透明块（与高版本 else 分支同）。
+            if (!isLiquidGlassMode) {
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .graphicsLayer {
+                            val progressOffset = dampedDragAnimation.value * tabWidthPx
+                            translationX =
+                                if (isLtr) progressOffset + panelOffset else -progressOffset + panelOffset
+                        }
+                        .clip(CircleShape)
+                        .background(indicatorColor.copy(alpha = 0.15f), CircleShape)
+                        .height(56.dp)
+                        .width(tabWidthDp),
+                )
+            } else {
             Box(
                 Modifier
                     .padding(horizontal = 4.dp)
@@ -381,6 +414,7 @@ internal fun LowLiquidGlassTabBar(
                     .height(56.dp)
                     .width(tabWidthDp),
             )
+            }
         }
     }
 }

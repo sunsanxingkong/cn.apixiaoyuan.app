@@ -85,11 +85,27 @@ vec2 toTopLeftCoord() {
 
 /**
  * 等价 AGSL 的 `content.eval(coord)`。
- * coord = 左上原点像素坐标；内部翻成 GL 的左下原点归一化 UV。
- * 双线性插值 + clamp-to-edge 由 GL 规范保证（与 AGSL 的 eval 一致）。
+ *
+ * coord = **左上原点**像素坐标（与 AGSL 同语义）。
+ *
+ * # ★★ 为什么不翻 Y（2026-10-05 真机修正）
+ *
+ * 初版这里写成 `1.0 - coord.y / uSize.y`，真机表现为**整块玻璃上下颠倒**。
+ *
+ * 推导（想清楚这一次，以后别再绕）：
+ *
+ *  1. `GLUtils.texImage2D` 把 Bitmap 的**第 0 行**（= 图像顶部）放在纹理 **v = 0**。
+ *     ⇒ 纹理里 **v = 0 就对应图像顶部**（"自上而下"的纹理）。
+ *  2. `coord.y` 已经是左上原点（0 = 顶部，见 [toTopLeftCoord]）。
+ *  3. 要采样「同一位置」，就要让 `coord.y = 0` 采到 `v = 0`：
+ *     ⇒ **`uv.y = coord.y / uSize.y`**，不该再翻。
+ *
+ * 初版多翻了一次 ⇒ 屏幕顶部采到图像底部 ⇒ 上下颠倒。
+ *
+ * 双线性插值 + clamp-to-edge 由 GL 规范保证（与 AGSL 的 `eval` 一致）。
  */
 vec4 evalContent(sampler2D tex, vec2 coord) {
-    vec2 uv = vec2(coord.x / uSize.x, 1.0 - coord.y / uSize.y);
+    vec2 uv = vec2(coord.x / uSize.x, coord.y / uSize.y);
     return texture2D(tex, uv);
 }
 """

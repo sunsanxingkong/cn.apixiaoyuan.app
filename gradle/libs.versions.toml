@@ -7,6 +7,10 @@ activity = "1.13.0"
 androidx-core-ktx = "1.19.0"
 lifecycle-runtime = "2.11.0"
 miuix = "0.9.4-rc01"
+# Kyant backdrop（液态玻璃上游库；与 suchat 同源）
+# https://github.com/Kyant0/AndroidLiquidGlass  |  https://kyant.gitbook.io/backdrop
+kyant-backdrop = "2.0.1"
+kyant-shapes = "1.2.1"
 materialkolor = "5.0.0"
 material-icons = "1.7.8"
 serialization = "1.11.0"
@@ -35,6 +39,11 @@ miuix-shader = { module = "top.yukonga.miuix.kmp:miuix-shader-android", version.
 miuix-nav = { module = "top.yukonga.miuix.kmp:miuix-nav-android", version.ref = "miuix" }
 miuix-ui = { module = "top.yukonga.miuix.kmp:miuix-ui-android", version.ref = "miuix" }
 miuix-icons = { module = "top.yukonga.miuix.kmp:miuix-icons-android", version.ref = "miuix" }
+# --- kyant backdrop（液态玻璃控件；效果基于 RenderEffect → 需 Android 12+） ---
+# 效果顺序固定：colorFilter ⇒ blur ⇒ lens（官方文档）
+kyant-backdrop = { module = "io.github.kyant0:backdrop", version.ref = "kyant-backdrop" }
+# ContinuousCapsule / Capsule 等连续圆角形状（lens 要求 shape 是 CornerBasedShape）
+kyant-shapes = { module = "io.github.kyant0:shapes", version.ref = "kyant-shapes" }
 materialkolor = { module = "com.materialkolor:material-kolor", version.ref = "materialkolor" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 androidx-room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }

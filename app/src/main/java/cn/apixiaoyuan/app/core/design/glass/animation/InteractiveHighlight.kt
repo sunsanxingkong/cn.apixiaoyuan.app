@@ -45,6 +45,15 @@ class InteractiveHighlight(
     private var startPosition = Offset.Zero
     val offset: Offset get() = positionAnimation.value - startPosition
 
+    /**
+     * 按压进度（0..1）—— 0 = 未按下，1 = 完全按下。
+     *
+     * ★ 2026-10-04 新增（移植 Kyant 液态玻璃控件时补齐）：
+     * 液态玻璃按钮用它驱动「按下时鼓包 + 高光渐入」；内部本来就有这个动画
+     * （`pressProgressAnimation`），只是没暴露出来。**纯增量**，不改既有行为。
+     */
+    val pressProgress: Float get() = pressProgressAnimation.value
+
     val modifier: Modifier =
         Modifier.drawWithContent {
             val progress = pressProgressAnimation.value

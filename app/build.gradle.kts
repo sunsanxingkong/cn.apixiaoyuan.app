@@ -188,6 +188,11 @@ dependencies {
     // 用于把顶栏返回键换成 miuix 规范的矢量图标，替代 material-icons 的细箭头。
     implementation(libs.miuix.icons)
 
+    // --- kyant backdrop（液态玻璃控件，与 suchat 同源）---
+    // 开关/滑块/按钮的「液态玻璃」外观；颜色全部走 MiuixTheme 语义色（莫奈）。
+    implementation(libs.kyant.backdrop)
+    implementation(libs.kyant.shapes)
+
     // --- MaterialSymbols 图标库 ---
     // 只引 outlined：filled 变体本地缓存无该产物、包结构未经解包验证，
     // AppIcons 统一复用 outlined。等 CI 跑通后再补 filled 与 forKeySelected。

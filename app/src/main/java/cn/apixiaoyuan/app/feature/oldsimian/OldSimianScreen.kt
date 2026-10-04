@@ -26,6 +26,8 @@ import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.design.component.AppScrollScaffold
 import cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs
 import cn.apixiaoyuan.app.core.pk.host.PkAutoHostService
+import cn.apixiaoyuan.app.core.design.glass.kyant.LiquidToggle
+import cn.apixiaoyuan.app.core.design.glass.kyant.rememberPageBackdropOrFallback
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -453,10 +455,29 @@ private fun SwitchRow(
             Text(text = title, color = MiuixTheme.colorScheme.onSurfaceContainer)
             Text(text = summary, color = MiuixTheme.colorScheme.onSurfaceContainerVariant)
         }
-        Switch(
-            checked = checked,
+        // ★ 2026-10-04：开关换成 **Kyant 液态玻璃版**（与 suchat 同款）。
+        //
+        // ## 颜色一律走 MiuixTheme 语义色 = **跟随莫奈取色**
+        //
+        // 上游 Kyant 示例是硬编码色（苹果绿 `0xFF34C759` / 蓝 `0xFF0088FF`），
+        // 直接抄会丢掉莫奈。本组件内部已改为：
+        //   · 选中轨道 → `colorScheme.primary`
+        //   · 未选中轨道 → `colorScheme.surfaceContainerHighest`
+        //   · 滑块表面 → `colorScheme.surfaceContainerHigh`
+        // 所以换壁纸后开关颜色会跟着变（与全局主题一致）。
+        //
+        // ## 采样源
+        //
+        // 玻璃要「折射下面的内容」需要一个 Backdrop。本页是 AppScrollScaffold
+        // （miuix 的 backdrop 类型与 Kyant 不是同一个），没有 provide
+        // `LocalKyantBackdrop`，因此这里回退到**纯色采样**（页面底色）——
+        // 玻璃形状/高光/按压物理全部保留，只是不折射滚动内容。
+        val backdrop = rememberPageBackdropOrFallback(MiuixTheme.colorScheme.surface)
+        LiquidToggle(
+            selected = { checked },
+            onSelect = onCheckedChange,
+            backdrop = backdrop,
             enabled = enabled,
-            onCheckedChange = onCheckedChange,
         )
     }
 }

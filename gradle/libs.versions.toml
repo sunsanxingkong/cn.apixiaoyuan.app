@@ -10,6 +10,8 @@ miuix = "0.9.4-rc01"
 # Kyant backdrop（液态玻璃上游库；与 suchat 同源）
 # https://github.com/Kyant0/AndroidLiquidGlass  |  https://kyant.gitbook.io/backdrop
 kyant-backdrop = "2.0.1"
+# Tukaani XZ for Java（纯 Java，~120KB）—— 解 cloudflared.xz 用
+xz = "1.10"
 kyant-shapes = "1.2.1"
 materialkolor = "5.0.0"
 material-icons = "1.7.8"
@@ -44,6 +46,8 @@ miuix-icons = { module = "top.yukonga.miuix.kmp:miuix-icons-android", version.re
 kyant-backdrop = { module = "io.github.kyant0:backdrop", version.ref = "kyant-backdrop" }
 # ContinuousCapsule / Capsule 等连续圆角形状（lens 要求 shape 是 CornerBasedShape）
 kyant-shapes = { module = "io.github.kyant0:shapes", version.ref = "kyant-shapes" }
+# XZ 解压（纯 Java）：App 内解 bin/cloudflared.xz
+xz = { module = "org.tukaani:xz", version.ref = "xz" }
 materialkolor = { module = "com.materialkolor:material-kolor", version.ref = "materialkolor" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 androidx-room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }

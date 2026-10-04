@@ -11,6 +11,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import cn.apixiaoyuan.app.core.design.glass.kyant.LiquidToggle
+import cn.apixiaoyuan.app.core.design.glass.kyant.rememberPageBackdropOrFallback
 import cn.apixiaoyuan.app.core.design.component.AppScrollScaffold
 import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.navigation.RouteAccountStats
@@ -21,7 +23,6 @@ import cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
@@ -196,6 +197,13 @@ private fun SwitchRow(
             Text(text = title, color = MiuixTheme.colorScheme.onSurfaceContainer)
             Text(text = summary, color = MiuixTheme.colorScheme.onSurfaceContainerVariant)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        // ★ 2026-10-04（用户要求「所有开关都用液态玻璃」）：
+        //   miuix Switch → Kyant 液态玻璃开关（颜色走 MiuixTheme 语义色 = 跟随莫奈）。
+        val rowBackdrop = rememberPageBackdropOrFallback(MiuixTheme.colorScheme.surface)
+        LiquidToggle(
+            selected = { checked },
+            onSelect = onCheckedChange,
+            backdrop = rowBackdrop,
+        )
     }
 }

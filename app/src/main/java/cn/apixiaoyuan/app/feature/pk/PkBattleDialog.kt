@@ -21,9 +21,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import cn.apixiaoyuan.app.core.design.glass.kyant.LiquidToggle
+import cn.apixiaoyuan.app.core.design.glass.kyant.rememberPageBackdropOrFallback
 import cn.apixiaoyuan.app.core.pk.PkBattleEngine
 import cn.apixiaoyuan.app.core.pk.PkMode
-import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -102,15 +103,19 @@ fun PkBattleDialog(
                             color = MiuixTheme.colorScheme.onSurfaceContainer,
                             modifier = Modifier.weight(1f),
                         )
-                        Switch(
-                            checked = mode in selectedModes,
-                            onCheckedChange = { checked ->
+                        // ★ 2026-10-04（用户要求「所有开关都用液态玻璃」）：
+                        //   miuix Switch → Kyant 液态玻璃开关（颜色走 MiuixTheme 语义色）。
+                        val dlgBackdrop = rememberPageBackdropOrFallback(MiuixTheme.colorScheme.surface)
+                        LiquidToggle(
+                            selected = { mode in selectedModes },
+                            onSelect = { checked ->
                                 selectedModes = if (checked) {
                                     selectedModes + mode
                                 } else {
                                     selectedModes - mode
                                 }
                             },
+                            backdrop = dlgBackdrop,
                         )
                     }
                 }

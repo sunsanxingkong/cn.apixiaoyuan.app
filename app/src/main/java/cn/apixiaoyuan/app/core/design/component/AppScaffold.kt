@@ -128,6 +128,27 @@ fun AppScaffold(
     // 改成与 containerColor 同值后：顶栏模糊区的底色 == 页面底色，
     // 视觉上只剩「磨砂过渡」，不再有分块感。
     val surfaceColor = MaterialTheme.colorScheme.surfaceContainer
+
+    // ★★ 2026-10-04：**高低版本分流**（miuix-blur 的 minSdk 是 33）。
+    //
+    // 高版本（API 33+）：原样走 miuix 的 `rememberLayerBackdrop` + `progressiveTextureBlur`
+    //   —— 下面这段代码**一字未改**。
+    // 低版本（API 24–32）：miuix-blur 加载即崩（NoClassDefFoundError），
+    //   且 `progressiveTextureBlur` 在 < 33 上也只会直接 return。
+    //   所以换成**对应的低版本实现**：顶栏改用 miuix 官方在 blur 不可用时的
+    //   降级路径（实色顶栏，那个分支本来就在 BlurredTopBar 里），
+    //   内容层的 backdrop 录制改走 Compose 自带 GraphicsLayer（lowLayerBackdrop）。
+    if (android.os.Build.VERSION.SDK_INT < 33) {
+        LowAppScaffold(
+            title = title,
+            onBack = onBack,
+            modifier = modifier,
+            bottomInset = bottomInset,
+            surfaceColor = surfaceColor,
+            content = content,
+        )
+        return
+    }
     val backdrop = rememberLayerBackdrop {
         drawRect(surfaceColor)
         drawContent()

@@ -58,6 +58,19 @@ object PkProtocol {
     /** PK H5 页面目录（拼 Referer 用）。 */
     private const val H5_DIR = "/bh5/leo-web-oral-pk/"
 
+    /** gzip 头里 OS 标志所在的字节下标（0 基）。 */
+    private const val GZIP_OS_BYTE_INDEX = 9
+
+    /**
+     * 真机 gzip 产物的 OS 标志值（`0xff` = unknown）。
+     *
+     * 对齐 pk-node `native.gzipLikeDevice()` 的 `GZIP_OS_BYTE_VALUE = 0xff`：
+     * 设备侧 zlib 写的是 `0xff`，而 JDK 的 `GZIPOutputStream` 写的是 `0x00`（FAT）。
+     * 服务端 gunzip 不看这个字节，所以**不改也不影响功能**；改它是为了让整条链路
+     * 的产物与真机逐字节一致 —— 排查「服务端为什么判异构」时少一个变量。
+     */
+    private const val GZIP_OS_BYTE_VALUE: Byte = 0xFF.toByte()
+
     // ---- 公共查询参数（真机 PK 出题请求逐字）----
 
     /**
@@ -337,15 +350,34 @@ object PkProtocol {
         val gz = runCatching {
             val out = ByteArrayOutputStream(plainJson.size.coerceAtLeast(64))
             java.util.zip.GZIPOutputStream(out).use { it.write(plainJson) }
-            out.toByteArray()
+            patchGzipOsByte(out.toByteArray())
         }.getOrNull() ?: return null
         return ContentBridge.encode(gz)
     }
 
+    /**
+     * 把 gzip 头的 OS 标志改成真机值（`0xff`）。
+     *
+     * 只动第 [GZIP_OS_BYTE_INDEX] 个字节，其余（含 mtime=0、XFL=0、压缩级别）由
+     * JDK 默认值给出，与设备侧 `gzip -6 -n` 一致。数组太短时原样返回（防御性）。
+     */
+    private fun patchGzipOsByte(gz: ByteArray): ByteArray {
+        if (gz.size > GZIP_OS_BYTE_INDEX) gz[GZIP_OS_BYTE_INDEX] = GZIP_OS_BYTE_VALUE
+        return gz
+    }
+
+    /**
+     * gunzip → 明文。
+     *
+     * 用 JDK 自带的 [GZIPInputStream]：它**本身就透明处理多 member 拼接**
+     * （`InflaterInputStream` 才有「只解第一个 member」的坑，别把两者搞混），
+     * 所以不要自己手写 `1f 8b 08` 扫描 —— 那会在 deflate 数据里误命中，
+     * 把本来正确的明文拼坏，且极难定位。
+     */
     private fun gunzip(bytes: ByteArray): ByteArray {
         ByteArrayInputStream(bytes).use { input ->
             GZIPInputStream(input).use { gz ->
-                val out = ByteArrayOutputStream()
+                val out = ByteArrayOutputStream(bytes.size.coerceAtLeast(64))
                 val buf = ByteArray(8192)
                 while (true) {
                     val n = gz.read(buf)

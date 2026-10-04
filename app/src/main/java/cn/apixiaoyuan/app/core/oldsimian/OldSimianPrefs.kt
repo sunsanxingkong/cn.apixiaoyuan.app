@@ -184,7 +184,7 @@ object OldSimianPrefs {
      * 所以这个开关只作为**配置占位**保留：等本项目接入「个人资料编辑」时，
      * 由那条链路的客户端预校验读它。当前它不影响任何行为。
      */
-    var ignoreNicknameRestriction by mutableStateOf(false)
+    var ignoreNicknameRestriction by mutableStateOf(true)
 
     // ---- H5 调试 ----
 
@@ -339,7 +339,11 @@ object OldSimianPrefs {
         h5DebugConsole = p.getBoolean(KEY_H5_DEBUG_CONSOLE, false)
         customCostMs = p.getInt(KEY_CUSTOM_COST_MS, MIN_COST_MS)
             .coerceIn(COST_RANGE_MIN, COST_RANGE_MAX)
-        ignoreNicknameRestriction = p.getBoolean(KEY_IGNORE_NICKNAME, false)
+        // ★ 2026-10-04（用户要求）：**默认开启**。
+        // 默认值从 false → true：新装用户开箱即「客户端不校验长度与字符，
+        // 昵称原样提交，由服务端裁决」。老用户若自己关过，SP 里存着 false
+        // 会照旧覆盖 —— 尊重用户显式选择（getBoolean 的第二参只是默认）。
+        ignoreNicknameRestriction = p.getBoolean(KEY_IGNORE_NICKNAME, true)
         customScoreEnabled = p.getBoolean(KEY_CUSTOM_SCORE_ENABLED, false)
         customScoreValue = p.getInt(KEY_CUSTOM_SCORE_VALUE, 0).coerceAtLeast(0)
         customScoreKeypoint = p.getString(KEY_CUSTOM_SCORE_KEYPOINT, "").orEmpty()

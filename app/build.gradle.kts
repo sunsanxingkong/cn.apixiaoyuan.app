@@ -43,7 +43,11 @@ android {
 
     defaultConfig {
         applicationId = "cn.apixiaoyuan.app"
-        minSdk = 33
+        // ★ 2026-10-04：33 → **24**（Android 7.0）。
+        // 高版本（API 33+）行为不变；低版本走自写玻璃管线（core/design/glass/low/）。
+        // miuix-blur 自带 minSdk=33，由清单里的 tools:overrideLibrary 放行；
+        // 其类仅在 SDK_INT >= 33 时被加载（见 glass/GlassBackdrop 分流）。
+        minSdk = 24
         targetSdk = 37
         versionCode = (project.findProperty("versionCode") as String? ?: versionProps.getProperty("versionCode", "1")).toInt()
         versionName = project.findProperty("versionName") as String? ?: versionProps.getProperty("versionName", "0.1.0")

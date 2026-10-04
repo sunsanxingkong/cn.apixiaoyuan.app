@@ -52,7 +52,9 @@ data class OldSimianPrefsSnapshot(
     val customCostEnabled: Boolean = false,
     val customCostMs: Int = OldSimianPrefs.MIN_COST_MS,
     // ---- 账号：名字限制 ----
-    val ignoreNicknameRestriction: Boolean = false,
+    // ★ 2026-10-04：与 OldSimianPrefs 的默认对齐（默认开启）。
+    // 旧版导出的配置里该字段为 false 时会照旧覆盖 —— 尊重配置文件内容。
+    val ignoreNicknameRestriction: Boolean = true,
     // ---- 分数 ----
     val customScoreEnabled: Boolean = false,
     val customScoreValue: Int = 0,

@@ -63,8 +63,16 @@ object PkBattleRepository {
      */
     suspend fun fetchMatch(mode: PkMode, pointId: Int): PkMatchResponse = withContext(Dispatchers.IO) {
         val r = PkRawApi.match(mode, pointId)
-        if (r.status != 200) throw PkHttpException(r.status, r.text).also { logHttp("出题", mode, it) }
+        // ★★ 失败也必须先解密再读文本（对齐 pk-node `pkMatchV2`：`text` 一律取解密后的）。
+        //
+        // 频控响应（`400 请求过于频繁`）走的是**同一条加密链路** —— 直接读 r.text 是
+        // 二进制乱码，[PkHttpException.isRateLimited] 就找不到「频繁」，400 频控会被
+        // 当成「非频控错误」**立即判本局失败**（而不是重试）。
+        // 这是 2026-10-03「出题偶发直接失败、日志里 body 是一堆方块」的根因。
         val plain = PkProtocol.decodeEncrypted(r.body)?.toString(Charsets.UTF_8) ?: r.text
+        if (r.status != 200) {
+            throw PkHttpException(r.status, plain).also { logHttp("出题", mode, it) }
+        }
         val trimmed = plain.trim()
         if (!trimmed.startsWith("{")) {
             // 解不开也不是明文 JSON：八成是风控页/空响应，带原文抛出去便于定位
@@ -155,6 +163,7 @@ object PkBattleRepository {
         match: PkMatchResponse,
         costTimeMs: Long? = null,
         strokeMode: PkStrokeMode = PkStrokeMode.ARC,
+        seedBase: Int = defaultSeedBase(),
     ): PkSubmitBody {
         val pkIdStr = match.pkIdStr
             ?: error("出题响应缺 pkIdStr")
@@ -166,9 +175,15 @@ object PkBattleRepository {
         val submitQuestions = questions.mapIndexed { idx, q ->
             val answer = q.rightAnswer ?: ""
             // PK 笔迹：默认 ARC（比较题 `>` / `<` 用密集弧线，否则被服务端判作弊 403）；
-            // SEVEN_SEGMENT 时回落到七段码字形。seed 用题号，保证每题笔迹不同。
+            // SEVEN_SEGMENT 时回落到七段码字形。
+            //
+            // ★ seed 必须是「每轮一变的基础值 + 题号」（对齐 pk-node
+            //   `seedBase: (Date.now() % 1e9) + attempt`）：
+            //   只用题号的话，同一个知识点刷 10 轮，10 轮的笔迹**逐点完全相同** ——
+            //   服务端比对多局笔迹雷同会判机器作答（这正是 pk-node 特意引入 seedBase 的原因）。
+            val seed = seedBase + idx
             val script: String = if (strokeMode == PkStrokeMode.ARC) {
-                OralStrokes.pkArcScript(answer, seed = idx)
+                OralStrokes.pkArcScript(answer, seed = seed)
                     ?: (OralStrokes.scriptJson(answer) ?: "[]")
             } else {
                 OralStrokes.scriptJson(answer) ?: "[]"
@@ -229,4 +244,18 @@ object PkBattleRepository {
             }
         }
     }.getOrDefault(emptyList())
+
+    /**
+     * 本轮笔迹的随机种子基础值（对齐 pk-node `seedBase: (Date.now() % 1e9) + attempt`）。
+     *
+     * 取 `System.nanoTime()` 的低 30 位而不是 `Random.nextInt()`：
+     *  - 不需要额外取随机数（少一次全局随机源竞争，多玩法并发时更稳）；
+     *  - 天然随时间变化 → **跨轮不重复**，正是我们要的性质；
+     *  - 取值范围落在 Int 正区间，进 `Random(seed)` 不会有负数前缀问题。
+     *
+     * 注意：**不需要**与 pk-node 的 mulberry32 逐位一致 —— 服务端只校验
+     * 「像不像真人手写 + 多题之间不雷同」，不校验具体点集。
+     */
+    private fun defaultSeedBase(): Int =
+        ((System.nanoTime() ushr 3) and 0x3FFF_FFFFL).toInt()
 }

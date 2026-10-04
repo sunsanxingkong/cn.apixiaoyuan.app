@@ -27,6 +27,9 @@ import cn.apixiaoyuan.app.core.design.component.LocalBottomBarInset
 import cn.apixiaoyuan.app.core.design.glass.LiquidGlassTabBar
 import cn.apixiaoyuan.app.core.design.glass.TabBarMode
 import cn.apixiaoyuan.app.core.design.glass.TabItem
+import cn.apixiaoyuan.app.core.design.glass.low.LowLiquidGlassTabBar
+import cn.apixiaoyuan.app.core.design.glass.low.lowLayerBackdrop
+import cn.apixiaoyuan.app.core.design.glass.low.rememberLowGlassBackdrop
 import cn.apixiaoyuan.app.core.design.theme.ReverseOldGuyTheme
 import cn.apixiaoyuan.app.core.design.theme.ThemePrefs
 import cn.apixiaoyuan.app.core.navigation.AppNavHost
@@ -165,39 +168,121 @@ private fun MainPager(
 ) {
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
-    val backdrop = rememberLayerBackdrop()
 
+    // ★★ 2026-10-04：**高低版本分流**（用户要求「高版本死都别动，低版本开写」）。
+    //
+    // · 高版本（API 33+）：完全走原来的 miuix-blur 链路 —— 代码**一字未改**，
+    //   仅在 `if` 分支里保留原样，行为与改动前一致。
+    // · 低版本（API 24–32）：miuix-blur 的 `blur`/`lens` 在 < 33 上会直接 return
+    //   （效果整个消失，只剩半透明色块），所以换用 core/design/glass/low/ 里
+    //   自写的 CPU 管线（模糊=RenderScript、折射=AGSL 逐行翻译、高光/内阴影软件绘制）。
+    //
+    // 两条路径共享**同一套几何与动画参数**（64dp 高、4dp 内边距、56dp 指示器、弹簧参数），
+    // 所以观感一致；区别只在「像素由谁画」。
     Box(Modifier.fillMaxSize()) {
-        // 内容层写入 backdrop，供底栏采样做 LiquidGlass 折射。
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            // ================= 高版本：原样保留（勿动） =================
+            val backdrop = rememberLayerBackdrop()
+            // 内容层写入 backdrop，供底栏采样做 LiquidGlass 折射。
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .layerBackdrop(backdrop),
+            ) { page ->
+                PagerPage(page, navController)
+            }
+            LiquidGlassTabBar(
+                items = tabs,
+                // 选中态用 targetPage：滑动过程中指示器立刻指向目标页，不迟滞。
+                selectedIndex = pagerState.targetPage,
+                onSelect = { index ->
+                    // 老挂戏老叟同款：animateScrollToPage 触发平移动画。
+                    scope.launch { pagerState.animateScrollToPage(index) }
+                },
+                backdrop = backdrop,
+                // 底栏三态来自设置页（液态玻璃 / 毛玻璃 / 纯色）。
+                mode = when (ThemePrefs.bottomBarMode) {
+                    ThemePrefs.BottomBarMode.LIQUID_GLASS -> TabBarMode.LiquidGlass
+                    ThemePrefs.BottomBarMode.FROSTED -> TabBarMode.Blur
+                    ThemePrefs.BottomBarMode.SOLID -> TabBarMode.None
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = barBottomPadding),
+            )
+        } else {
+            // ================= 低版本：自写 CPU 玻璃管线 =================
+            LowPagerWithGlassBar(
+                tabs = tabs,
+                barBottomPadding = barBottomPadding,
+                pagerState = pagerState,
+                scope = scope,
+                navController = navController,
+            )
+        }
+    }
+}
+
+/** Pager 的一页 —— 高低版本共用（抽出来避免两条分支重复同一段 when）。 */
+@Composable
+private fun PagerPage(
+    page: Int,
+    navController: cn.apixiaoyuan.app.core.navigation.AppNavController,
+) {
+    when (page) {
+        0 -> HomeScreen(navController)
+        1 -> cn.apixiaoyuan.app.feature.oldsimian.OldSimianScreen(navController)
+        2 -> cn.apixiaoyuan.app.feature.log.LogScreen(navController)
+        else -> SettingsScreen(navController)
+    }
+}
+
+/**
+ * 低版本 Pager + 自写玻璃底栏 —— 与高版本分支**结构一一对应**。
+ *
+ * 对应关系：
+ *  - `rememberLayerBackdrop()`（miuix）↔ `rememberLowGlassBackdrop`（Compose GraphicsLayer）
+ *  - `.layerBackdrop(backdrop)`      ↔ `.lowLayerBackdrop(backdrop)`
+ *  - `LiquidGlassTabBar(...)`        ↔ `LowLiquidGlassTabBar`（自写、参数同源）
+ *
+ * 另外挂一个**背景采样泵**：定期把内容层抓成位图（供玻璃折射），
+ * 否则玻璃永远只有第一帧的背景。抓取内部有节流，静止时不会持续耗电。
+ */
+@Composable
+private fun LowPagerWithGlassBar(
+    tabs: List<TabItem>,
+    barBottomPadding: Dp,
+    pagerState: androidx.compose.foundation.pager.PagerState,
+    scope: kotlinx.coroutines.CoroutineScope,
+    navController: cn.apixiaoyuan.app.core.navigation.AppNavController,
+) {
+    val lowBackdrop = rememberLowGlassBackdrop()
+
+    androidx.compose.runtime.LaunchedEffect(lowBackdrop, pagerState) {
+        while (true) {
+            lowBackdrop.capture()
+            kotlinx.coroutines.delay(80L)
+        }
+    }
+
+    // 用 Box 提供 BoxScope，才能对底栏用 align(BottomCenter)（与高版本分支结构一致）。
+    Box(Modifier.fillMaxSize()) {
         HorizontalPager(
             state = pagerState,
             modifier = Modifier
                 .fillMaxSize()
-                .layerBackdrop(backdrop),
+                .lowLayerBackdrop(lowBackdrop),
         ) { page ->
-            when (page) {
-                0 -> HomeScreen(navController)
-                1 -> cn.apixiaoyuan.app.feature.oldsimian.OldSimianScreen(navController)
-                2 -> cn.apixiaoyuan.app.feature.log.LogScreen(navController)
-                else -> SettingsScreen(navController)
-            }
+            PagerPage(page, navController)
         }
-
-        LiquidGlassTabBar(
+        LowLiquidGlassTabBar(
             items = tabs,
-            // 选中态用 targetPage：滑动过程中指示器立刻指向目标页，不迟滞。
             selectedIndex = pagerState.targetPage,
             onSelect = { index ->
-                // 老挂戏老叟同款：animateScrollToPage 触发平移动画。
                 scope.launch { pagerState.animateScrollToPage(index) }
             },
-            backdrop = backdrop,
-            // 底栏三态来自设置页（液态玻璃 / 毛玻璃 / 纯色）。
-            mode = when (ThemePrefs.bottomBarMode) {
-                ThemePrefs.BottomBarMode.LIQUID_GLASS -> TabBarMode.LiquidGlass
-                ThemePrefs.BottomBarMode.FROSTED -> TabBarMode.Blur
-                ThemePrefs.BottomBarMode.SOLID -> TabBarMode.None
-            },
+            backdrop = lowBackdrop,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = barBottomPadding),

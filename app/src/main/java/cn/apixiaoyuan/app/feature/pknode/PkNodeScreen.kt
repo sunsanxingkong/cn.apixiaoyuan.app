@@ -1,6 +1,7 @@
 package cn.apixiaoyuan.app.feature.pknode
 
 import android.annotation.SuppressLint
+import android.view.ViewGroup
 import android.graphics.Bitmap
 import android.webkit.CookieManager
 import android.webkit.WebResourceError
@@ -118,10 +119,25 @@ fun PkNodeScreen(navController: AppNavController) {
 
     val webView = remember {
         WebView(context).apply {
-            // 与 PK 容器同样的焦点纪律：WebView 天生可聚焦，持有焦点会在
-            // 「点一下再返回」时触发 Compose 重入合成崩溃（详见 PkH5Screen 的注释）。
-            isFocusable = false
-            isFocusableInTouchMode = false
+            // ★★ 2026-10-04（用户反馈「app 里的 pk-node 页面无法调用输入法」）：
+            //   **必须可聚焦**，否则软键盘弹出不出来。
+            //
+            // # 之前为什么写成 false（以及它错在哪）
+            //
+            // 早先这里写 ，理由是「WebView 持有焦点会在
+            // 点一下再返回时触发 Compose 重入合成崩溃」。那个崩溃是**真的**，
+            // 但「禁止聚焦」是**过度治疗**：WebView 不可聚焦 ⇒ 点输入框时
+            // 系统不给它输入焦点 ⇒ **IME（输入法）永远弹不出来**。
+            // 管理后台有搜索框、登录表单，全都点不动键盘。
+            //
+            // # 正解（与 PkH5Screen / PkH5ChildScreen 已采用的方案一致）
+            //
+            // 允许聚焦，但在**移出视图树之前主动 clearFocus**（见下面的
+            // onRelease 回调与 releaseWebView）。崩溃的根因是「移除时仍持有
+            // 焦点」，清掉焦点就断掉了，不需要牺牲可聚焦性。
+            isFocusable = true
+            isFocusableInTouchMode = true
+            descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true

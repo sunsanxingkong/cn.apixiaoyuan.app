@@ -57,6 +57,27 @@ object PkBattleEngine {
     const val DEFAULT_ROUND_INTERVAL_MS = 0L
 
     /**
+     * **出题冷却配速**（对齐 pk-node `PK.matchCooldownMs`）：默认 **0 = 不预防性等待**。
+     *
+     * pk-node 里这个值只是「引擎是否**自动**替你贴着冷却下沿发车」的开关：
+     *  - `0`（默认）→ 完全按用户填的轮间隔走，撞到 400/403 才由出题重试兜底；
+     *  - `> 0`  → 按「同账号上次成功出题时刻 + 该值」配速，不白撞窗口也不多等。
+     *
+     * 低版本（本 App）此前完全没有这个概念，用户想贴冷却只能自己把轮间隔填大 ——
+     * 填小了白跑一局，填大了白白拖慢。这里把它作为**可调参数**补上，默认关闭
+     * （保持既有行为不变）。
+     */
+    const val DEFAULT_MATCH_COOLDOWN_MS = 0L
+
+    /**
+     * 长等待期间的「滴答」间隔（毫秒）。
+     *
+     * 对齐 pk-node `sleepWithTicks` 的 5 秒：轮间隔 / 答题间隔 / 频控退避期间
+     * **必须持续有事件**，否则界面上就是一片空白，用户会以为卡死。
+     */
+    private const val TICK_INTERVAL_MS = 5_000L
+
+    /**
      * **提交**命中频控（403/429）时的退避基数（毫秒）。
      *
      * ## 为什么从 60s 降到 10s（2026-10-02，对齐 pk-node）
@@ -109,12 +130,20 @@ object PkBattleEngine {
      * @param matchRetryIntervalMs **出题**命中频控时的重试间隔（默认 [MATCH_RETRY_INTERVAL_MS]）
      * @param matchRetryMaxMs      **出题**重试的累计时间上限（默认 [MATCH_RETRY_MAX_MS]）
      * @param roundIntervalMs      每轮之间的固定间隔（毫秒，默认 0）
+     * @param matchCooldownMs      出题冷却配速（毫秒，默认 [DEFAULT_MATCH_COOLDOWN_MS] = 0 = 不预防性等待）
      * @param costTimeMs           每局提交的整卷耗时；null = 由题数 × 下限推导
      * @param submitDelayMinMs     出题成功 → 提交 之间的间隔下界
      * @param submitDelayMaxMs     出题成功 → 提交 之间的间隔上界
      * @param strokeMode           笔迹算法
      * @param onProgress           (玩法, 已完成轮数, 总轮数, 事件文本)
      * @return 各玩法最终完成轮数（含失败导致的不足 rounds 的情况）
+     *
+     * ## 笔迹 seed（★ 2026-10-04 修正）
+     *
+     * 每轮生成一个**新的** `seedBase` 下发给 [PkBattleRepository.buildSubmitBody]，
+     * 与 pk-node `seedBase: (Date.now() % 1e9) + attempt` 同义。
+     * 修正前把 `seed = 题号` 写死 —— 同一知识点连刷 N 轮，N 轮的 `script` 逐点相同，
+     * 服务端按「多局笔迹雷同」判机器作答。
      */
     suspend fun runBattle(
         rounds: Int,
@@ -126,6 +155,7 @@ object PkBattleEngine {
         matchRetryIntervalMs: Long = MATCH_RETRY_INTERVAL_MS,
         matchRetryMaxMs: Long = MATCH_RETRY_MAX_MS,
         roundIntervalMs: Long = DEFAULT_ROUND_INTERVAL_MS,
+        matchCooldownMs: Long = DEFAULT_MATCH_COOLDOWN_MS,
         costTimeMs: Long? = null,
         submitDelayMinMs: Long = DEFAULT_SUBMIT_DELAY_MIN_MS,
         submitDelayMaxMs: Long = DEFAULT_SUBMIT_DELAY_MAX_MS,
@@ -134,6 +164,11 @@ object PkBattleEngine {
     ): Map<PkMode, Int> = coroutineScope {
         require(rounds >= 1) { "轮数必须 ≥1" }
         require(modes.isNotEmpty()) { "至少勾选一个玩法" }
+
+        // 对齐 pk-node 的 ctx.lastMatchOkAt：**按账号**共享「上次成功出题的时刻」，
+        // 多玩法并发时也共用同一份 —— 否则每个玩法各算各的，冷却配速互相不认账。
+        // 用 AtomicLong 而不是普通 var：多个 async 会并发读写它。
+        val lastMatchOkAt = java.util.concurrent.atomic.AtomicLong(0L)
 
         modes.associateWith { mode ->
             async {
@@ -147,6 +182,8 @@ object PkBattleEngine {
                         rateLimitBaseMs = rateLimitBaseMs,
                         matchRetryIntervalMs = matchRetryIntervalMs,
                         matchRetryMaxMs = matchRetryMaxMs,
+                        matchCooldownMs = matchCooldownMs,
+                        lastMatchOkAt = lastMatchOkAt,
                         costTimeMs = costTimeMs,
                         submitDelayMinMs = submitDelayMinMs,
                         submitDelayMaxMs = submitDelayMaxMs,
@@ -162,7 +199,10 @@ object PkBattleEngine {
                         // 不是「失败即停」。
                     }
                     if (round < rounds && roundIntervalMs > 0) {
-                        delay(roundIntervalMs)
+                        onProgress(mode, done, rounds, "轮间隔：${roundIntervalMs / 1000}s 后开始下一轮")
+                        sleepWithTicks(roundIntervalMs) { leftMs ->
+                            onProgress(mode, done, rounds, "距下一轮还有 ${ceilSeconds(leftMs)}s")
+                        }
                     }
                 }
                 done
@@ -184,6 +224,8 @@ object PkBattleEngine {
      * 计数分开：频控等待不计入 [maxRetry]，否则「1 次 403 + 2 次普通重试」
      * 会在窗口还没过时就宣告整局失败。
      *
+     * @param matchCooldownMs 出题冷却配速（0 = 关闭，见 [DEFAULT_MATCH_COOLDOWN_MS]）
+     * @param lastMatchOkAt   **同账号**上次成功出题的时刻（毫秒；0 = 本账号还没成功过）
      * @return true = 本局成功（出题+提交+结算都成功）；false = 重试耗尽仍失败。
      */
     private suspend fun runOneRound(
@@ -194,12 +236,32 @@ object PkBattleEngine {
         rateLimitBaseMs: Long,
         matchRetryIntervalMs: Long,
         matchRetryMaxMs: Long,
+        matchCooldownMs: Long,
+        lastMatchOkAt: java.util.concurrent.atomic.AtomicLong,
         costTimeMs: Long?,
         submitDelayMinMs: Long,
         submitDelayMaxMs: Long,
         strokeMode: PkStrokeMode,
         onEvent: (String) -> Unit,
     ): Boolean {
+        // ---------- 0) 出题冷却配速（对齐 pk-node `runOneRound` 第 1 步）----------
+        //
+        // 默认关闭（matchCooldownMs = 0）：不做任何预防性等待，完全按用户填的轮间隔走。
+        // 开启后按「上次成功出题 + 冷却」配速 —— 既不白撞窗口，也不多等。
+        if (matchCooldownMs > 0) {
+            val last = lastMatchOkAt.get()
+            if (last > 0) {
+                val target = last + matchCooldownMs
+                val wait = target - System.currentTimeMillis()
+                if (wait > 0) {
+                    onEvent("按出题冷却（${matchCooldownMs / 1000}s/账号）等 ${wait / 1000}s 后出题")
+                    sleepWithTicks(wait) { leftMs ->
+                        onEvent("距下轮出题还有 ${ceilSeconds(leftMs)}s")
+                    }
+                }
+            }
+        }
+
         // ---------- 1) 出题（撞频控自动重试，不再先睡 60s）----------
         onEvent("出题中… pointId=$pointId")
         val m = fetchMatchWithRetry(
@@ -212,6 +274,9 @@ object PkBattleEngine {
             onEvent = onEvent,
         ) ?: return false
 
+        // 记下这次成功时刻（**按账号**共享）→ 下一轮据此贴冷却下沿发车
+        lastMatchOkAt.set(System.currentTimeMillis())
+
         // ---------- 2) 答题间隔（像真人：看题 → 写答案 → 交卷）----------
         val lo = minOf(submitDelayMinMs, submitDelayMaxMs).coerceAtLeast(0L)
         val hi = maxOf(submitDelayMinMs, submitDelayMaxMs).coerceAtLeast(0L)
@@ -219,7 +284,7 @@ object PkBattleEngine {
             val d = lo + Random.nextLong(0, (hi - lo + 1).coerceAtLeast(1))
             if (d > 0) {
                 onEvent("答题间隔：${d / 1000}s 后提交")
-                delay(d)
+                sleepWithTicks(d) { leftMs -> onEvent("距提交还有 ${ceilSeconds(leftMs)}s") }
             }
         }
 
@@ -284,7 +349,7 @@ object PkBattleEngine {
                     "提交命中频控（HTTP ${rl.code}），等待 ${wait / 1000}s 后重试" +
                         "（第 $submitRateLimitWaits/$RATE_LIMIT_MAX_WAIT 次）"
                 )
-                delay(wait)
+                sleepWithTicks(wait) { leftMs -> onEvent("退避中，还剩 ${ceilSeconds(leftMs)}s") }
             } catch (t: Throwable) {
                 submitAttempt++
                 if (submitAttempt >= maxRetry) {
@@ -294,7 +359,9 @@ object PkBattleEngine {
                 val backoff = retryBaseMs * (1L shl (submitAttempt - 1))
                 val jitter = Random.nextLong(0, backoff.coerceAtLeast(1) + 1)
                 onEvent("提交失败：${t.message ?: t}，第 $submitAttempt 次重试（${backoff + jitter}ms 后）")
-                delay(backoff + jitter)
+                sleepWithTicks(backoff + jitter) { leftMs ->
+                    onEvent("提交重试倒计时 ${ceilSeconds(leftMs)}s")
+                }
             }
         }
     }
@@ -352,7 +419,9 @@ object PkBattleEngine {
                     "出题被频控（HTTP ${rl.code}），${matchRetryIntervalMs / 1000}s 后自动重试" +
                         "（已等 ${waited / 1000}s）"
                 )
-                delay(matchRetryIntervalMs)
+                sleepWithTicks(matchRetryIntervalMs) { leftMs ->
+                    onEvent("出题重试倒计时 ${ceilSeconds(leftMs)}s")
+                }
             } catch (t: Throwable) {
                 attempt++
                 if (attempt >= maxRetry) {
@@ -362,8 +431,41 @@ object PkBattleEngine {
                 val backoff = retryBaseMs * (1L shl (attempt - 1))
                 val jitter = Random.nextLong(0, backoff.coerceAtLeast(1) + 1)
                 onEvent("出题失败：${t.message ?: t}，第 $attempt 次重试（${backoff + jitter}ms 后）")
-                delay(backoff + jitter)
+                sleepWithTicks(backoff + jitter) { leftMs -> onEvent("出题重试倒计时 ${ceilSeconds(leftMs)}s") }
             }
         }
     }
+
+    /**
+     * 带「滴答」的可中断长睡眠（对齐 pk-node `sleepWithTicks`）。
+     *
+     * ## 为什么不能直接 `delay(ms)`
+     *
+     * 轮间隔、答题间隔、频控退避动辄几十秒。直接 `delay` 的话这段时间里
+     * **界面上一个事件都没有** —— 用户看到的是卡死（这是 2026-10-02 排查
+     * 「一秒就结束」与后续「页面像挂了」时反复踩到的观感问题）。
+     *
+     * 这里每 [TICK_INTERVAL_MS] 回调一次剩余时间，既给界面心跳，
+     * 又保留 `delay` 的**可取消性**（协作式取消在每次 `delay` 处生效，
+     * 所以「停止」依然能立刻打断这段等待）。
+     *
+     * @param totalMs 总时长（≤0 直接返回）
+     * @param onTick  每 5 秒回调一次剩余毫秒；**最后一段不回调**（说「还剩 0s」没有意义）
+     */
+    private suspend fun sleepWithTicks(
+        totalMs: Long,
+        onTick: (Long) -> Unit = {},
+    ) {
+        var left = totalMs.coerceAtLeast(0L)
+        while (left > 0) {
+            val step = minOf(TICK_INTERVAL_MS, left)
+            delay(step)
+            left -= step
+            if (left <= 0) break
+            onTick(left)
+        }
+    }
+
+    /** 剩余毫秒 → 向上取整的秒（日志文案用，避免出现「还剩 0s」）。 */
+    private fun ceilSeconds(ms: Long): Long = (ms + 999L) / 1000L
 }

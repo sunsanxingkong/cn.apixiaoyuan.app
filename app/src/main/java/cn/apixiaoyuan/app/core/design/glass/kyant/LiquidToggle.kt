@@ -104,6 +104,24 @@ fun LiquidToggle(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
+    // ★★ 2026-10-04：**高低版本分流**（用户要求「高版本死都别动，低版本开写」）。
+    //
+    // kyant 的 `blur()` / `RuntimeShader` 在低版本是**直接 return、什么都不画**的
+    // （isRenderEffectSupported = SDK≥31、isRuntimeShaderSupported = SDK≥33），
+    // 所以 Android 7 上跑本函数滑块玻璃会**整个消失**、只剩纯色圆点。
+    // 低版本改走自写 CPU 管线（core/design/glass/low/LowLiquidToggle.kt），
+    // 参数与下面这段**完全同源**（8dp 模糊 / 5dp-10dp 折射 / Capsule）。
+    // 高版本一行未改，继续走下面的 kyant 实现。
+    if (android.os.Build.VERSION.SDK_INT < 33) {
+        cn.apixiaoyuan.app.core.design.glass.low.LowLiquidToggle(
+            selected = selected,
+            onSelect = onSelect,
+            modifier = modifier,
+            enabled = enabled,
+        )
+        return
+    }
+
     // ★ 2026-10-04：`DampedDragAnimation` 的回调是**构造时捕获**的（`remember` 只跑一次），
     //   直接闭包引用会永久持有首帧的 lambda —— 开关数量多、每个都带自己的
     //   `onCheckedChange` 时，改成别的行就会调错回调。

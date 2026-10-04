@@ -43,7 +43,8 @@ class PkHttpException(
             code == 403 ||
             body.contains("频繁") ||
             body.contains("too many", ignoreCase = true) ||
-            body.contains("rate limit", ignoreCase = true)
+            body.contains("rate", ignoreCase = true) ||
+            body.contains("blocked", ignoreCase = true)
 
     /** 是否「提交内容被拒」而非频控 —— 目前无法从响应体区分，一律归入 [isRateLimited]。 */
     val isRejected: Boolean get() = !isRateLimited

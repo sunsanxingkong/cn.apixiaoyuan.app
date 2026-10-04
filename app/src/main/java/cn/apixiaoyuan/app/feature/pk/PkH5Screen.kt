@@ -232,6 +232,18 @@ fun PkH5Screen(
     val hostState = PkHostOrchestrator.state
     val targetUrl = PkHostOrchestrator.h5Url()
 
+    // 入口 URL **只算一次**（★ 关键，2026-10-04）。
+    //
+    // 为什么不能每次重组都调 `h5Url()`：它按 pk-node 的 openPkPage 拼了
+    // `&t=<now>` 防缓存参数 —— 每次调用结果都不同。而下面的 `update` 判据是
+    // 「URL 变了才 loadUrl」，若 URL 每次都变 → **每次重组都 loadUrl → 页面无限刷新**。
+    //
+    // 与 pk-node 一致：那个 URL 只在「打开 PK 页面」时拼一次。
+    // 重算时机 = 服务就绪（拿到 h5Base）+ 用户主动重试（reloadToken 变）。
+    val entryUrl = remember(hostState is PkHostOrchestrator.State.Ready, viewModel.reloadToken) {
+        if (hostState is PkHostOrchestrator.State.Ready) PkHostOrchestrator.h5Url() else null
+    }
+
     val bg = pageColor.value ?: MaterialTheme.colorScheme.surfaceContainer
 
     // 状态栏图标：底色深 → 浅色图标。
@@ -269,7 +281,9 @@ fun PkH5Screen(
                     // ★ 让出状态栏那一条：顶上露出根 Column 的 background(bg) = **纯色填充**。
                     .padding(top = topInset),
                 update = { v ->
-                    val url = PkHostOrchestrator.h5Url() ?: return@AndroidView
+                    // ★ 用只算一次的 entryUrl（见上），不要每次重组都调 h5Url()
+                    //   —— 那会因 `&t=<now>` 每次都变而导致页面无限刷新。
+                    val url = entryUrl ?: return@AndroidView
                     val target = url to viewModel.reloadToken
                     if (viewModel.webError == null && target != loadedTarget) {
                         loadedTarget = target

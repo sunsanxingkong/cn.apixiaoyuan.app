@@ -411,12 +411,59 @@ object PkHostOrchestrator {
         val r = state as? State.Ready ?: return null
         // ★ 拼进 URL 的是 pk-node 的账号主键（见 [State.Ready.leoAccountId] 的说明）
         val id = r.leoAccountId
-        return if (id != null && id > 0) {
-            if (r.h5Base.contains("leoAccountId=")) r.h5Base
-            else r.h5Base + "?leoAccountId=" + id
-        } else {
-            r.h5Base
+        val base = r.h5Base
+
+        // ★★ 2026-10-04：**完全照搬 pk-node 的 openPkPage 拼 URL**。
+        //
+        // pk-node（`public/app.js:288`）拼的是：
+        //
+        //     frame.src = '/pk-h5/pk.html?leoAccountId=' + id +
+        //       '&pkbot=' + pkbot + '&t=' + Date.now();
+        //
+        // 而 App 此前**只传了 leoAccountId** —— 少了 `pkbot` 与 `t`。
+        // 两者都不是可有可无：
+        //
+        //  - `pkbot`：三个自动能力（视为正确答案 / 自动提交画笔 / 自动下一局）。
+        //    H5 侧 `pkBotCfg()` 会「**没带 pkbot 时读 localStorage 旧值**」，
+        //    所以不传就会继承上一次的残留配置 —— 行为不确定。必须像 pk-node
+        //    一样**显式传**（没勾就传 `off`，全关）。
+        //  - `t`：**防缓存**。这个页面里内联了 H5 hook，吃缓存就会加载到
+        //    「没有 hook 的旧页面」（H5_INJECT 的响应头也写了 no-store，
+        //    这里再兜一层，与 pk-node 一致）。
+        val sb = StringBuilder(base)
+        // base 可能已经带了 query（handshake 返回的 h5Base 带 leoAccountId 时）——
+        // 那就用 `&` 续接，**不能直接 return**（否则会丢掉 pkbot / t）。
+        if (!base.contains("leoAccountId=")) {
+            sb.append(if (base.contains('?')) "&" else "?").append("leoAccountId=").append(id ?: 0)
         }
+        if (!base.contains("pkbot=")) {
+            sb.append("&pkbot=").append(pkbotParam())
+        }
+        sb.append("&t=").append(System.currentTimeMillis())
+        return sb.toString()
+    }
+
+    /**
+     * 三个自动能力 → `pkbot` 参数（与 pk-node 的 `openPkPage` 逐字一致）。
+     *
+     * 取自 App 自己的三个开关（语义一一对应）：
+     *
+     * | App 开关 | pk-node 的 cap |
+     * |---|---|
+     * | [cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs.autoCorrect] | `answer`（视为正确答案）|
+     * | [cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs.pkStrokeEnabled] | `autoStroke`（自动提交画笔）|
+     * | [cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs.autoNextRound] | `autoNext`（自动下一局）|
+     *
+     * 三个都关 → `off`（**显式全关**，而不是省略 —— 省略会让 H5 去读 localStorage 旧值）。
+     */
+    private fun pkbotParam(): String {
+        val p = cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs
+        val caps = buildList {
+            if (p.autoCorrect) add("answer")
+            if (p.pkStrokeEnabled) add("autoStroke")
+            if (p.autoNextRound) add("autoNext")
+        }
+        return if (caps.isEmpty()) "off" else caps.joinToString(",")
     }
 
     /** 兜底 H5 地址（handshake 挂了但服务活着时用）。 */

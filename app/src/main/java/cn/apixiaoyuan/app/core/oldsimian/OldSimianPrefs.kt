@@ -55,7 +55,6 @@ object OldSimianPrefs {
     private const val KEY_PK_STROKE_ENABLED = "pk_stroke_enabled"
     private const val KEY_PK_STROKE_COUNT = "pk_stroke_count"
     private const val KEY_PK_STROKE_INTERVAL_MS = "pk_stroke_interval"
-    private const val KEY_PK_GRIND_FLOATING_ENTRY = "pk_grind_floating_entry"
 
     /**
      * 每题耗时的下限（毫秒）。与
@@ -319,13 +318,15 @@ object OldSimianPrefs {
     var pkStrokeIntervalMs by mutableStateOf(PK_STROKE_INTERVAL_DEFAULT)
 
     /**
-     * PK 页是否显示「刷轮数」悬浮入口（**默认关**，待办 11 重）。
+     * PK 页「刷轮数」悬浮入口 —— ★ 2026-10-04 **整体删除**。
      *
-     * 该悬浮按钮固定在右下角，会压住 H5 自己的按钮（用户实测：挡事）。
-     * 改成默认隐藏，需要时在「老挂戏老叟 → PK」里打开。
+     * > 用户原话：「还有把功能里的显示刷轮数悬浮入口删了」
+     *
+     * 原本是 `PkScreen` 右下角的原生按钮（弹 [PkBattleDialog] 刷 PK 轮数），
+     * 但 `PkScreen` **早就改成纯内置 pk-node 的 H5 容器**（2026-10-03），
+     * 刷局能力全在 pk-node 侧；这个开关既没有渲染点、又会误导用户以为开着没用。
+     * 所以连 `pkGrindFloatingEntry` 字段 + SP 键一起清掉。
      */
-    var pkGrindFloatingEntry by mutableStateOf(false)
-
     /** 由 `App.onCreate` 调用。 */
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -356,7 +357,6 @@ object OldSimianPrefs {
             .coerceIn(PK_STROKE_COUNT_MIN, PK_STROKE_COUNT_MAX)
         pkStrokeIntervalMs = p.getInt(KEY_PK_STROKE_INTERVAL_MS, PK_STROKE_INTERVAL_DEFAULT)
             .coerceIn(PK_STROKE_INTERVAL_MIN, PK_STROKE_INTERVAL_MAX)
-        pkGrindFloatingEntry = p.getBoolean(KEY_PK_GRIND_FLOATING_ENTRY, false)
     }
 
     /** 写盘。设置页每次改动调用一次。 */
@@ -382,7 +382,6 @@ object OldSimianPrefs {
             .putBoolean(KEY_PK_STROKE_ENABLED, pkStrokeEnabled)
             .putInt(KEY_PK_STROKE_COUNT, pkStrokeCount)
             .putInt(KEY_PK_STROKE_INTERVAL_MS, pkStrokeIntervalMs)
-            .putBoolean(KEY_PK_GRIND_FLOATING_ENTRY, pkGrindFloatingEntry)
             .apply()
     }
 

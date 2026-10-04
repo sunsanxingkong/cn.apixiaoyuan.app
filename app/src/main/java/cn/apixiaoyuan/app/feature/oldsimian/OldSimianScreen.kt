@@ -86,12 +86,11 @@ private const val NOT_WIRED_NOTE = "（PK H5 功能尚未接入，暂不可用�
  * | PK · 结束页自动化 | **置灰** | 注入 `pk_auto_next.js`，新架构未实现 |
  * | PK · 去除排行榜动效 | **置灰** | 注入 `pk_no_anim.js`，新架构未实现 |
  * | PK · 自动提交画笔 | **置灰** | 注入 `pk_auto_stroke.js`，新架构未实现 |
- * | PK · 显示刷轮数悬浮入口 | 保留 | 原生按钮，不经 H5，工作正常 |
+ * | PK · 显示刷轮数悬浮入口 | **删** | 2026-10-04 用户要求；开关无渲染点，连 pref 一起清 |
  * | H5 调试 · Eruda | 保留 | 用户明确要求保留 JS 控制台 |
  * | 分数（2 项） | **整段删 UI** | 与刷分区同源（同一 pref、同一 `RouteScorePump`） |
  *
  * 保留的开关（真实接入、不可删）：
- *  - 显示刷轮数悬浮入口 → `PkScreen` 渲染原生按钮；
  *  - Eruda 调试台 → `PkJsInjector` 注入 `assets/js/eruda.js`。
  *
  * 已删但**仍在底层生效**的（供将来决定是否彻底移除）：
@@ -203,15 +202,6 @@ fun OldSimianScreen(
                     checked = OldSimianPrefs.noRankingAnim,
                     onCheckedChange = {
                         OldSimianPrefs.noRankingAnim = it
-                        OldSimianPrefs.persist()
-                    },
-                )
-                SwitchRow(
-                    title = "显示刷轮数悬浮入口",
-                    summary = "PK 页右下角显示「刷轮数」按钮（默认关：会压住 H5 按钮）",
-                    checked = OldSimianPrefs.pkGrindFloatingEntry,
-                    onCheckedChange = {
-                        OldSimianPrefs.pkGrindFloatingEntry = it
                         OldSimianPrefs.persist()
                     },
                 )

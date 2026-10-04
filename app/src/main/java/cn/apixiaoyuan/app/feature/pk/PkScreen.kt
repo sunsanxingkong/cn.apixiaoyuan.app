@@ -35,8 +35,9 @@ import cn.apixiaoyuan.app.core.navigation.RoutePkH5
  *
  * 删掉后本页只剩「一个全屏 H5 容器」，也就没有可挡的东西了。
  *
- * ⚠️ 注意：[PkBattleDialog] / `OldSimianPrefs.pkGrindFloatingEntry` 的**类本身没删**
- * （那是跨层的东西，见 `OldSimianScreen` 的说明），只删了本页的入口渲染。
+ * ⚠️ 2026-10-04 补：`OldSimianPrefs.pkGrindFloatingEntry` 与功能页的开关**也已删除**
+ * （用户要求「把功能里的显示刷轮数悬浮入口删了」）—— 到此这条链路全部清干净。
+ * [PkBattleDialog] 类本身**保留**（属刷局引擎，用户要求不动），只是不再有入口。
  */
 @Composable
 fun PkScreen(

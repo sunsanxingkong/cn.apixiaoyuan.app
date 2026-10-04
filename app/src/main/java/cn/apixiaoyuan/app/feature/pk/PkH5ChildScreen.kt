@@ -136,6 +136,10 @@ fun PkH5ChildScreen(
                 domStorageEnabled = true
                 loadsImagesAutomatically = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                // ★★ 2026-10-04：与入口容器一致 —— 必须开，否则 H5 的 meta viewport 被忽略，
+                //   页面按物理像素宽（1280）排版 → 排行榜等内容溢出屏幕外（详见 PkH5Screen 的说明）。
+                useWideViewPort = true
+                loadWithOverviewMode = true
             }
 
             webViewClient = object : WebViewClient() {

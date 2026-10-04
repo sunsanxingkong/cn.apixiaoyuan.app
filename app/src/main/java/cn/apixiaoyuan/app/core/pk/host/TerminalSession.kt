@@ -160,21 +160,46 @@ class TerminalSession internal constructor(
             //   - `$$` 是**外层** sh 的 pid；
             //   - `exec` 替换映像、pid 不变 → pidfile 里就是最终那个交互 sh 的 pid。
             //   这是绕开「Android 没有 Process.pid()」的唯一干净办法（见类 KDoc 坑 1）。
-            val inner = "echo \$\$ > ${pidFile.absolutePath}; exec $SHELL -i"
+            val inner = "echo \$\$ > ${pidFile.absolutePath}; cd ${home.absolutePath}; exec $SHELL -i"
             val pb = ProcessBuilder(SHELL, "-c", inner)
             pb.directory(home)
             pb.environment().apply {
-                put("PATH", "/system/bin:/system/xbin")
-                // ★ 与 NodeRuntime 完全一致：node 的库在前、系统库在后。
-                //   这样终端里敲 `<nativeDir>/libnode.so server.js` 能直接跑起来。
-                put("LD_LIBRARY_PATH", "$nativeDir:/system/lib64")
+                put("PATH", "$home/bin:/system/bin:/system/xbin")
+                // ⚠️ 刻意**不把 nativeLibraryDir 放进 LD_LIBRARY_PATH**（2026-10-04 修）。
+                //
+                // # 症状
+                // 终端里敲 `curl www.baidu.com` 报：
+                //   CANNOT LINK EXECUTABLE "curl": cannot locate symbol
+                //   "EVP_MD_CTX_create" referenced by "/system/bin/curl"
+                //
+                // # 真因
+                // 原来写的是 `LD_LIBRARY_PATH=$nativeDir:/system/lib64` —— nativeDir 里
+                // 有 node 自己的 `libcrypto.so`（OpenSSL 3，已去掉 EVP_MD_CTX_create 这类旧符号）。
+                // 动态链接器**按目录顺序找**，于是 `/system/bin/curl` 被强行塞了 node 的
+                // libcrypto → 找不到旧符号 → 直接崩。
+                // 这是「用全局 LD_LIBRARY_PATH 图省事」的经典副作用：它会影响**所有**子进程。
+                //
+                // # 正确做法
+                // 什么都不设 —— `/system/lib64` 本来就在动态链接器的默认搜索路径里，
+                // 系统命令（curl / toybox / sh）自然用系统库。
+                //
+                // 想跑内置 node 时，**按次指定**即可（不污染其他命令）：
+                //   LD_LIBRARY_PATH=$NODE_LIB $PK_NODE_BIN server.js
+                // 为此下面仍导出 `PK_NODE_LIB`。
+                put("LD_LIBRARY_PATH", "")
                 put("HOME", home.absolutePath)
                 put("TMPDIR", home.absolutePath)
                 // 方便用户 `cd $PK_NODE_DIR`
                 put("PK_NODE_DIR", File(home, "pk-node").absolutePath)
                 put("PK_NODE_BIN", File(nativeDir, "libnode.so").absolutePath)
+                /** node 的库目录 —— 跑 node 时临时用：`LD_LIBRARY_PATH=$PK_NODE_LIB $PK_NODE_BIN x.js` */
+                put("PK_NODE_LIB", nativeDir)
                 put("PK_TERM_ID", id.toString())
+                // ⚠️ 刻意**不设 PS1**：真机实测（Android 15 / mksh）**完全忽略**
+                //   `PS1=...` 环境变量 —— 设了反而让启动时的 `sh -i` 打一堆
+                //   「can't find tty fd」告警。提示符仍用系统默认 `$`。
             }
+            // ★ 合并 stderr：只影响我们读到的顺序，不影响上面那些环境变量。
             pb.redirectErrorStream(true)
             val p = pb.start()
             process = p
@@ -186,6 +211,17 @@ class TerminalSession internal constructor(
                     val r = BufferedReader(InputStreamReader(p.inputStream))
                     while (true) {
                         val line = r.readLine() ?: break
+                        // ★ 2026-10-04：过滤 `sh -i` 在**非 tty** 下的两条固有噪声。
+                        //
+                        // 我们的 sh 是挂在管道上的（没有 pty），mksh 一启动必然打：
+                        //   /system/bin/sh: can't find tty fd: No such device or address
+                        //   /system/bin/sh: warning: won't have full job control
+                        // 这两条**不代表出错**（Ctrl+C 我们是用 SIGINT 扫子进程实现的，
+                        // 见 interrupt()，本来就不依赖 job control），但会糊在用户第一眼
+                        // 看到的位置。只屏蔽这两条精确匹配，其他 stderr 照常显示。
+                        if (line.contains("can't find tty fd") ||
+                            line.contains("won't have full job control")
+                        ) continue
                         append(line)
                     }
                 }
@@ -194,7 +230,11 @@ class TerminalSession internal constructor(
             }.apply { isDaemon = true; name = "pk-terminal-${this@TerminalSession.id}" }.start()
 
             append("[终端 $id 已启动] $SHELL -i    cwd=${home.absolutePath}")
-            append("[提示] Ctrl+C 中断当前命令；内置 node：\$PK_NODE_BIN；工作区：\$PK_NODE_DIR")
+            append("[提示] Ctrl+C 中断当前命令；内置 node：执行 node（已替你设好库路径）；工作区：\$PK_NODE_DIR")
+            // ★ 2026-10-04（用户反馈 `curl` 报 symbol 错 + 提示符错行后补）：
+            //   给内置 node 一个**包装脚本**，避免「库路径全局污染」和「每次都要手打
+            //   LD_LIBRARY_PATH」。它是可执行的 shell 脚本，放在 filesDir（可执行、非 W^X 目录）。
+            installNodeWrapper(nativeDir, home)
             // ★ 2026-10-04（用户要求）：每个**新终端会话**开头打一个 `sxd` 字符画。
             //   放在「已启动 / 提示」之后，这样启动信息仍是最先出现的，
             //   字符画作为「新会话」的视觉分隔（多开终端时一眼能看出哪块是哪次）。
@@ -208,12 +248,42 @@ class TerminalSession internal constructor(
             false
         }
     }
-
-    /** 后台起（UI 用）。 */
+/** 后台起（UI 用）。 */
     fun startAsync() {
         if (isRunning) return
         Thread { start() }.apply { isDaemon = true; name = "pk-terminal-start-${this@TerminalSession.id}" }.start()
     }
+
+    /**
+     * 安装内置 node 的**包装脚本** `files/bin/node`（★ 2026-10-04）。
+     *
+     * # 为什么需要
+     * 内置 node（`libnode.so`）依赖同目录下一堆库（`libcxx_node.so` 等），必须设
+     * `LD_LIBRARY_PATH=$nativeDir` 才能起来。但**不能**把这个变量放进全局环境 ——
+     * 那会让系统命令（`curl` / `toybox`）被强行挂上 node 的 `libcrypto`，
+     * 报 `cannot locate symbol "EVP_MD_CTX_create"`（本轮用户实测就是这个坑）。
+     *
+     * 折中且标准的做法：写一个只给 node 自己用的包装脚本，
+     *   - 在**脚本内部**设 `LD_LIBRARY_PATH`，作用域仅限该次 node 进程；
+     *   - 放到 `files/bin` 并加进 `PATH` → 终端里直接敲 `node` 即可。
+     *
+     * 脚本落在 `filesDir`（App 私有、可执行、不受 W^X 限制），每次启动覆盖写（幂等）。
+     */
+    private fun installNodeWrapper(nativeDir: String, home: File) {
+        runCatching {
+            val binDir = File(home, "bin").apply { mkdirs() }
+            val f = File(binDir, "node")
+            val script = buildString {
+                append("#!/system/bin/sh\n")
+                append("# 内置 Node 包装器（App 自动生成，勿手改）\n")
+                append("export LD_LIBRARY_PATH=\"$nativeDir\"\n")
+                append("exec \"$nativeDir/libnode.so\" \"\$@\"\n")
+            }
+            f.writeText(script)
+            f.setExecutable(true, false)
+        }.onFailure { Log.w(logTag, "写 node 包装脚本失败：${it.message}") }
+    }
+
 
     /**
      * 执行一条命令。

@@ -439,15 +439,35 @@ object PkHostOrchestrator {
         if (!base.contains("pkbot=")) {
             sb.append("&pkbot=").append(pkbotParam())
         }
-        // ⚠️ 刻意**不**在 App 侧传 `sbh`。
+        // ★★ 2026-10-04：**把状态栏高度传给 H5**（`sbh` 参数）—— 这是「对齐 pk-node」的关键一半。
         //
-        // 理由：App 容器已经在 `PkH5Screen` 里给 WebView 留了 `statusBarTopDp()`
-        // （≈152px）的顶部空白；而 H5 拿到 `getImmerseStatusBarHeight` 后
-        // **自己还会再留一次** → 双重留白。
+        // # 为什么现在要传（之前刻意不传）
         //
-        // pk-node 侧已支持「宿主传了就生效、没传就回 0」，所以这里不传即可
-        // 保持现状（与之前一致，不会回归）；哪天决定「由 H5 自己处理沉浸式」，
-        // 只要把 App 的 padding 去掉、并在这里补 `&sbh=<px>` 就行。
+        // 之前 App 是在 `PkH5Screen` 里给 WebView 加 `padding(top = statusBarTopDp())`
+        // 来让开状态栏，所以这里**不能**再传 sbh，否则 H5 也留一次 = 双重留白。
+        //
+        // 但那个做法有个**致命副作用**（用户报「排行榜看不到」「界面有问题」的根因）：
+        // WebView 被 padding 后，**它的高度比屏幕少一个状态栏**（≈152px），
+        // 而 H5 页面是按视口单位布局的：
+        //
+        // ```css
+        // .honor-roll        { height:100vh; overflow:hidden }              /* 整页 */
+        // .honor-podium      { height:257Px }                               /* 领奖台 */
+        // .content.android5  { height: calc(100vh - 82.66667vw) }           /* 榜单区 = 它 */
+        // ```
+        // 于是 `calc(100vh - 82.67vw)` ≈ 257px —— **正好等于领奖台高度**，
+        // 榜单区 `.rank-list` 高度被压成 **0** → 内容全裁掉、连滚动都没有 → **空白**。
+        //
+        // # 现在的分工（与 pk-node 逐字一致）
+        //
+        //   · App：WebView **占满**（不要 padding）→ `100vh` = 真实全屏，vh 布局正常；
+        //   · H5：自己调桥 `getImmerseStatusBarHeight` 拿 `sbh`，自己留顶部空白。
+        //
+        // pk-node 就是这么分工的 —— 它的 iframe 占满，页面靠桥得知状态栏高度。
+        // 所以「App 也传 sbh + 去掉 padding」才是真正的 1:1 对齐。
+        if (!base.contains("sbh=")) {
+            sb.append("&sbh=").append(immersiveStatusBarPx())
+        }
         // ★ 2026-10-04：告诉 H5「跑在 App 容器里」—— 决定 closeWebView 的返回语义。
         //
         // 浏览器（pk-node 管理后台 iframe）里所有页面共用一个历史栈，`history.back()`
@@ -500,5 +520,25 @@ object PkHostOrchestrator {
         state = State.Idle
         started = false
         startedBlocking = false
+    }
+
+    /**
+     * 状态栏高度（像素，整数）—— 传给 H5 的 sbh 参数。
+     *
+     * 供 H5 自己决定「沉浸式抬头要留多少」（页面会调桥 getImmerseStatusBarHeight）。
+     * 这是与 pk-node 分工一致的做法：宿主占满视口 + 告知状态栏高度，
+     * 由页面自己排版（详见 h5Url 里 sbh 那段注释）。
+     *
+     * 取值：读系统资源 status_bar_height；拿不到就回 0
+     * —— 让 H5 用它自己的兜底，而不是我们瞎猜一个数（各机型/挖孔屏差异很大）。
+     *
+     * 注意：刻意不写死任何机型的具体数值，一切按当前设备的真实资源来。
+     */
+    private fun immersiveStatusBarPx(): Int {
+        val ctx: Context = appCtx ?: return 0
+        return runCatching {
+            val id = ctx.resources.getIdentifier("status_bar_height", "dimen", "android")
+            if (id > 0) ctx.resources.getDimensionPixelSize(id) else 0
+        }.getOrDefault(0)
     }
 }

@@ -315,7 +315,8 @@ fun PkH5Screen(
             .background(bg),
     ) {
         // 顶部进度条：只在**首次加载**显示。
-        if (viewModel.webProgress in 1..99 && loadedTarget == null) {
+        val firstLoading = viewModel.webProgress in 1..99 && loadedTarget == null
+        if (firstLoading) {
             LinearProgressIndicator(
                 progress = { viewModel.webProgress / 100f },
                 modifier = Modifier.fillMaxWidth(),
@@ -326,9 +327,41 @@ fun PkH5Screen(
             AndroidView(
                 factory = { webView },
                 modifier = Modifier
-                    .fillMaxSize()
-                    // ★ 让出状态栏那一条：顶上露出根 Column 的 background(bg) = **纯色填充**。
-                    .padding(top = topInset),
+                    .fillMaxSize(),
+                // ★★ 2026-10-04：**这里刻意不加 `padding(top = topInset)`**（改动点）。
+                //
+                // # 原来的写法与它的后果（根因）
+                //
+                // 原来是 `.fillMaxSize().padding(top = topInset)` —— WebView 被下推
+                // 一个状态栏高度（≈152px），于是 **WebView 的实际高度比屏幕少 152px**。
+                // 而 H5 页面（如荣誉榜）是这么布局的：
+                //
+                // ```css
+                // .honor-roll     { width:100vw; height:100vh; overflow:hidden }  /* 整页 */
+                // .honor-podium   { height: 257Px }                              /* 领奖台 */
+                // .content.android5 { height: calc(100vh - 82.66667vw) }          /* 榜单区 */
+                // .rank-list .honor-roll-list { overflow-y:auto; height:100% }
+                // ```
+                //
+                // `100vh` 跟着 WebView 一起变小 → `calc(100vh - 82.67vw)` ≈ **257px**，
+                // **正好等于领奖台的高度** → 榜单区 `.rank-list` 高度被压成 **0**
+                // → 内容全部被裁掉、连滚动都没有 → 用户看到的就是**一片空白**。
+                //
+                // 这就是「pk-node 完全没问题、App 不行」的第二个结构性差异
+                // （第一个是 openWebView 的幂等性，见 handleScheme）：
+                //   · pk-node 的 iframe **占满**，`100vh` = 全屏，垂直布局正常；
+                //   · App 用 padding 让出状态栏 → 视口被压扁 → H5 的 vh 布局全塌。
+                //
+                // # 那顶部遮挡怎么办（原来加 padding 的理由）
+                //
+                // 交给 H5 自己处理 —— **这正是 pk-node 的做法**：
+                // 页面会调桥 `getImmerseStatusBarHeight` 来决定自己留多少顶部空白。
+                // 所以现在改为「WebView 占满 + 把状态栏高度经由桥传进去」，
+                // 见 `PkHostOrchestrator.h5Url()` 里的 `sbh` 参数。
+                //
+                // ⚠️ 两端只留一端：既然 H5 自己会留，这里就**不能**再 padding，
+                //    否则就是双重留白（也就是之前刻意不传 sbh 的原因 —— 现在反过来，
+                //    去掉 padding、传 sbh，与 pk-node 完全一致）。
                 update = { v ->
                     // ★ 用只算一次的 entryUrl（见上），不要每次重组都调 h5Url()
                     //   —— 那会因 `&t=<now>` 每次都变而导致页面无限刷新。
@@ -343,6 +376,14 @@ fun PkH5Screen(
                 },
                 onRelease = { v -> releaseWebView(v) },
             )
+
+            // ★ 2026-10-04（用户要求「顺便给页面来个加载动画」）：
+            //   首屏加载期间的居中脉冲圆点。叠在 WebView **之上** —— 页面加载完
+            //   （webProgress=100 或已 loadUrl）时 firstLoading 变 false，自然消失。
+            //   颜色按页面底色取对比色（H5LoadingDots 内部判亮度），深浅底都清楚。
+            if (firstLoading) {
+                cn.apixiaoyuan.app.core.design.component.H5LoadingDots(pageColor = bg)
+            }
 
             // ★ 2026-10-04（用户要求）：**删掉「正在启动内置服务…」的居中提示卡**。
             //

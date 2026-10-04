@@ -234,7 +234,8 @@ fun PkH5ChildScreen(
             .fillMaxSize()
             .background(bg),
     ) {
-        if (progress in 1..99 && !loadedOnce) {
+        val firstLoading = progress in 1..99 && !loadedOnce
+        if (firstLoading) {
             LinearProgressIndicator(
                 progress = { progress / 100f },
                 modifier = Modifier.fillMaxWidth(),
@@ -245,9 +246,13 @@ fun PkH5ChildScreen(
             AndroidView(
                 factory = { webView },
                 modifier = Modifier
-                    .fillMaxSize()
-                    // 顶上露出 background(bg) = 纯色填充。
-                    .padding(top = topInset),
+                    .fillMaxSize(),
+                // ★★ 2026-10-04：与入口容器一致 —— **去掉 `padding(top = topInset)`**。
+                //   WebView 被 padding 会让 H5 的 `100vh` 跟着变小，而荣誉榜/收到的赞
+                //   这些页面是 `height:100vh` + `overflow:hidden` + `calc(100vh - 82.67vw)`
+                //   分区布局 → 视口一矮，榜单区高度被压成 0 → 整页空白。
+                //   顶部留白改由 H5 自己用桥 `getImmerseStatusBarHeight` 处理
+                //   （= pk-node 的做法；sbh 由 h5Url() 传进 URL）。
                 update = { v ->
                     if (error == null && !loadedOnce) {
                         loadedOnce = true
@@ -257,6 +262,12 @@ fun PkH5ChildScreen(
                 },
                 onRelease = { v -> releaseWebView(v) },
             )
+
+            // ★ 2026-10-04（用户要求）：首屏加载动画（与入口容器一致）。
+            //   叠在 WebView 之上，加载完（progress=100 或已 loadUrl）自动消失。
+            if (firstLoading) {
+                cn.apixiaoyuan.app.core.design.component.H5LoadingDots(pageColor = bg)
+            }
 
             error?.let { msg ->
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

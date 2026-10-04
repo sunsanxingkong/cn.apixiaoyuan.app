@@ -92,6 +92,42 @@ data object RouteSamples : Route
 @Serializable
 data object RoutePk : Route
 
+/**
+ * **口算 PK 的「下一个 H5 容器」**（★ 2026-10-04 新增）。
+ *
+ * # 为什么需要它（用户逐字）
+ *
+ * > 「转场动画是**点击按钮 → miuix 或 aosp app 原生选择动画 → 进入新 h5 容器
+ * >   → 预测性返回 → 退回主页**。」
+ * > 「点击按钮跳转页面根本没有用跳转动画切换页面」
+ * > 「你根本没有使用**新 h5 容器**跳转页面」
+ *
+ * # 真因（代码取证）
+ *
+ * H5 里的跳转是调桥 `openSchema('native://openWebView?url=…')`，
+ * 而 **pk-node 的 H5_INJECT 把 `openWebView` 实现成了「同窗口导航」**：
+ *
+ * ```js
+ * // pk-h5-proxy.js:374
+ * // 本机把「开新 WebView」实现为同窗口导航。
+ * location.href = local;
+ * ```
+ *
+ * 于是「进入下一个页面」只是在**同一个 WebView 里换 URL** ——
+ * 没有新容器、没有 App 导航、**原生转场与预测性返回自然都不会播**。
+ *
+ * # 解法
+ *
+ * 宿主把「要开的新 URL」接过来，用 **App 原生导航**压一个新 entry：
+ * 每个下级 H5 页 = **一个新的 H5 容器** → miuix/aosp 转场 + 预测性返回全都回来了。
+ *
+ * @param url 要加载的完整 URL（由 H5 传上来，宿主已改写成本机同源地址）
+ */
+@Serializable
+data class RoutePkH5(
+    val url: String,
+) : Route
+
 /** 练习（二级页）。 */
 @Serializable
 data object RouteExercise : Route

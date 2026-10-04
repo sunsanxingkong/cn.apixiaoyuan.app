@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.navigation.RouteHome
+import cn.apixiaoyuan.app.core.navigation.RoutePkH5
 
 /**
  * 口算 PK 入口页。
@@ -61,6 +62,13 @@ fun PkScreen(
                     navController.popBackStack()
                 }
             },
+            // ★ 2026-10-04：H5 里「点按钮开下一个页面」→ **压一个新的 H5 容器**。
+            //
+            // 用户要求：「点击按钮 → miuix/aosp 原生转场 → 进入新 h5 容器
+            //          → 预测性返回 → 退回主页」。
+            // 之前 H5 的 openWebView 被 pk-node 实现成同窗口 `location.href`，
+            // 宿主在这里接住它、改走 App 导航 —— 转场与预测性返回才会生效。
+            onOpenChild = { childUrl -> navController.navigate(RoutePkH5(childUrl)) },
         )
     }
 }

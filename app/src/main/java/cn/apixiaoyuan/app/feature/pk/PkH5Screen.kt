@@ -103,6 +103,17 @@ import kotlinx.coroutines.withContext
 fun PkH5Screen(
     viewModel: PkViewModel,
     onFinish: () -> Unit = {},
+    /**
+     * 「H5 要开一个新页面」→ 宿主压一个**新的 H5 容器**（★ 2026-10-04）。
+     *
+     * 用户要求：「点击按钮 → miuix/aosp 原生转场 → 进入新 h5 容器 → 预测性返回」。
+     *
+     * H5 的 `openWebView` 桥在 pk-node 侧被实现为 `location.href`（同窗口导航），
+     * 所以宿主在 [WebViewClient.shouldOverrideUrlLoading] 里把这个导航**接住** ——
+     * 不让它在当前 WebView 里发生，而是交给 App 导航开新容器，
+     * 这样原生转场与预测性返回才会执行。
+     */
+    onOpenChild: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
 
@@ -177,11 +188,11 @@ fun PkH5Screen(
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: WebResourceRequest?,
-                ): Boolean = handleScheme(request?.url?.toString() ?: return false, onFinish)
+                ): Boolean = handleScheme(request?.url?.toString() ?: return false, onFinish, onOpenChild)
 
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
                 override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
-                    url?.let { handleScheme(it, onFinish) } ?: false
+                    url?.let { handleScheme(it, onFinish, onOpenChild) } ?: false
             }
 
             webChromeClient = object : WebChromeClient() {
@@ -392,7 +403,7 @@ private fun HostNotice(
  * 顺序：先 clearFocus（否则移除时会 Compose 重入合成崩溃）→ 清回调（防泄漏）
  * → stopLoading 再 destroy（否则网络线程回调已销毁的 WebView 会崩）。
  */
-private fun releaseWebView(view: WebView) {
+internal fun releaseWebView(view: WebView) {
     runCatching {
         view.clearFocus()
         view.stopLoading()
@@ -405,17 +416,52 @@ private fun releaseWebView(view: WebView) {
 }
 
 /**
- * 拦截 `leo://` scheme（宿主侧兜底）。
+ * 处理「H5 自己发起的导航」（宿主侧兜底 + **新容器跳转**）。
  *
- * 内置 node 架构下绝大多数能力已被 pk-node 的 JS 桥接管，宿主只处理
- * 「页面自己冒出来」的 `close` / `back` / `finish`。
+ * 两台事：
+ *
+ * 1. `leo://close|back|finish` → 关容器（回上一级）。
+ * 2. **本机同源的「新页面」导航 → 交给 App 导航开一个「新的 H5 容器」**
+ *    （★ 2026-10-04，用户要求「进入新 h5 容器」）。
+ *
+ * ## 为什么第 2 条是必须的
+ *
+ * H5 里的跳转走桥 `openSchema('native://openWebView?url=…')`，
+ * 而 pk-node 的 `H5_INJECT` 把 `openWebView` 实现成 **`location.href` 同窗口导航**
+ * （见 `pk-h5-proxy.js:374`）。同窗口导航 = 当前 WebView 直接换 URL，
+ * **App 导航完全不知道** → 原生转场 / 预测性返回都不会播。
+ *
+ * 所以宿主在这里把它**接住**（返回 true = 不让 WebView 自己导航），
+ * 改为 `onOpenChild(url)` → `navController.navigate(RoutePkH5(url))`
+ * → 压一个新的 H5 容器 → 转场与预测性返回自然生效。
+ *
+ * @return true 表示已消费该 URL（WebView 不得自行导航）
  */
-private fun handleScheme(url: String, onFinish: () -> Unit): Boolean {
-    if (!url.startsWith("leo://")) return false
-    val host = Uri.parse(url).host ?: return false
-    if (host == "close" || host == "back" || host == "finish") {
-        onFinish()
+private fun handleScheme(
+    url: String,
+    onFinish: () -> Unit,
+    onOpenChild: (String) -> Unit,
+): Boolean {
+    if (url.startsWith("leo://")) {
+        val host = Uri.parse(url).host ?: return false
+        if (host == "close" || host == "back" || host == "finish") {
+            onFinish()
+            return true
+        }
+        // 其余自定义能力放行给 pk-node 的 JS 桥。
+        return false
+    }
+
+    // ★ 「新的 H5 页面」→ 由 App 导航开新容器（原生转场 + 预测性返回）。
+    //   判据：本机同源下的**另一个文档**（PK H5 页面都在 /pk-h5 或 /pk-h5-cdn）。
+    //   同文档的 hash 路由（`#/xxx`）不算「新页面」，不能拦 —— 拦了会把 SPA 换页也变成新容器。
+    if (url.contains("/pk-h5/") || url.contains("/pk-h5-cdn/")) {
+        // 排除「同一个 URL 只差 hash」的情况（WebView 在纯 hash 变化时通常不会
+        // 触发本回调，这里再兜一层，避免误把 SPA 换页当新页面）。
+        AppLogger.i("PkH5", "H5 请求新页面 → 开新容器：$url")
+        onOpenChild(url)
         return true
     }
+
     return false
 }

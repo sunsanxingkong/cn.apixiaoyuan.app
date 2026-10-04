@@ -78,6 +78,21 @@ fun AppNavHost(
             entry<RoutePk>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                 cn.apixiaoyuan.app.feature.pk.PkScreen(navController)
             }
+            // ★ 2026-10-04 新增：H5 内部「开新页面」→ 宿主压**一个新的 H5 容器**。
+            //
+            // 用户要求：「点击按钮 → miuix/aosp 原生转场 → 进入新 h5 容器
+            //          → 预测性返回 → 退回主页」。
+            // 之前 pk-node 的 H5 把 openWebView 实现成 `location.href` 同窗口导航
+            // （见 pk-h5-proxy.js:374），App 导航毫不知情 → 没有任何转场。
+            // 现在由宿主接住 openWebView → navigate 到这里 → App 原生转场生效。
+            entry<cn.apixiaoyuan.app.core.navigation.RoutePkH5>(
+                swipeDismiss = NavSwipeDirection.LeftToRight,
+            ) { key ->
+                cn.apixiaoyuan.app.feature.pk.PkH5ChildScreen(
+                    url = key.url,
+                    navController = navController,
+                )
+            }
             // ★ 2026-10-03 新增：Linux 终端（主页快捷入口 → 这里）。
             entry<RouteTerminal>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                 cn.apixiaoyuan.app.feature.terminal.TerminalScreen(navController)

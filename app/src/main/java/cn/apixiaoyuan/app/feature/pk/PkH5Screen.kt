@@ -157,31 +157,35 @@ fun PkH5Screen(
                 domStorageEnabled = true
                 loadsImagesAutomatically = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                // ★★ 2026-10-04：**必须开这两个**，否则 H5 的 `<meta viewport>` 被忽略。
+                // ★★ 2026-10-04：**必须开这两个**，否则 H5 的 meta viewport 被忽略。
                 //
-                // # 症状（用户报「排行榜显示不了」）
+                // # 症状（用户报「排行榜显示不了」，以及 PK 开赛后的界面错位）
                 //
-                // 荣誉榜/排行榜页的 DOM 里出现 `未获得@375,59 / @682,59 / @989,59 / @1296,59`
-                // —— **x 坐标到了 1296，而屏幕只有 1280px** → 内容排到屏幕外，看不见。
+                // 荣誉榜/排行榜页的 DOM 里，一排元素被排到 `x ≈ 屏宽` 甚至更远
+                // （实测取证：屏宽 1280px 的设备上排到 1296）→ **内容整片落到屏幕外**。
+                // 主 PK 页同理：一行本该 2 个的「1v1PK / 8人PK」按钮挤成 5 组，末组贴边。
                 //
                 // # 真因
                 //
-                // H5 三个页面（pk.html / exercise.html / result.html / honor-roll.html）
+                // H5 页面（pk.html / exercise.html / result.html / honor-roll.html）
                 // **都声明了**：
                 // ```html
                 // <meta name="viewport" content="width=device-width,initial-scale=1,…">
                 // ```
                 // 但 WebView **默认 `useWideViewPort = false`** —— 此时 Chromium
-                // **忽略 meta viewport**，布局视口宽度直接取**物理像素宽（1280）**：
-                //   · H5 拿到的 `device-width` = 1280 → 按 1280 CSS px 排版；
-                //   · `devicePixelRatio` 的密度换算也失效。
-                // 于是内容比手机屏「宽 3 倍」，右边整片看不到。
+                // **忽略 meta viewport**，布局视口宽度直接取**物理像素宽**，而不是
+                // `device-width`（= 物理宽 / density）。于是 H5 拿到的 `device-width`
+                // 被放大成屏幕的**物理像素数**，页面按「比手机宽好几倍」的宽度排版。
                 //
-                // 开启后：`device-width` = 1280/3.25 ≈ **394 CSS px**（与浏览器一致），
-                // 页面按手机宽度排版，排行榜/结算页都正常。
+                // # 为什么这是**自适应**的（与本机参数无关）
                 //
-                // `loadWithOverviewMode` 是配套项：内容仍宽于视口时整体缩放以适配，
-                // 避免个别页（如贴了固定像素宽的表格）溢出。
+                // 这里**不设任何固定宽度/缩放**：开启 `useWideViewPort` 后，
+                // `device-width` 由 WebView 按当前设备的 `density` 自动换算，
+                // 页面自己就是响应式的（H5 用的是 vw/rem/flex）。所以
+                // 任何分辨率、任何 dpr 的设备都得到「与浏览器一致」的布局宽度。
+                //
+                // `loadWithOverviewMode` 是配套项：个别页面若仍有固定像素宽的内容，
+                // 交给 WebView 整体缩放适配，而不是靠宿主写死 scale。
                 useWideViewPort = true
                 loadWithOverviewMode = true
                 // UA 由 pk-node 自己伪装，宿主不追加（否则出现两段版本号）。

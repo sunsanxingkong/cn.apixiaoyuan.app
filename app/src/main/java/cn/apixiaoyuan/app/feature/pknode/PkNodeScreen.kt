@@ -128,7 +128,8 @@ fun PkNodeScreen(navController: AppNavController) {
                 loadsImagesAutomatically = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 // ★★ 2026-10-04：与 PK 两个 H5 容器保持一致 —— 管理后台同样是响应式页面，
-                //   不开这两个会让 meta viewport 失效、按物理像素宽（1280）排版而溢出。
+                //   不开这两个会让 meta viewport 失效、按物理像素宽排版而溢出。
+                //   自适应行为由 WebView 按设备 density 换算，无固定值。
                 useWideViewPort = true
                 loadWithOverviewMode = true
             }

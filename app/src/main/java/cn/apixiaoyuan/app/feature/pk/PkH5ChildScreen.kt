@@ -140,6 +140,34 @@ fun PkH5ChildScreen(
                         progress = 0
                     }
                 }
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                ): Boolean = handleScheme(
+                    request?.url?.toString() ?: return false,
+                    onFinish = { navController.popBackStack() },
+                    onOpenChild = { child ->
+                        navController.navigate(
+                            cn.apixiaoyuan.app.core.navigation.RoutePkH5(child),
+                        )
+                    },
+                    exceptUrl = url,
+                )
+
+                @Deprecated("Deprecated in API 24, but kept for older WebView")
+                override fun shouldOverrideUrlLoading(view: WebView?, u: String?): Boolean =
+                    u?.let {
+                        handleScheme(
+                            it,
+                            onFinish = { navController.popBackStack() },
+                            onOpenChild = { child ->
+                                navController.navigate(
+                                    cn.apixiaoyuan.app.core.navigation.RoutePkH5(child),
+                                )
+                            },
+                            exceptUrl = url,
+                        )
+                    } ?: false
             }
 
             webChromeClient = object : WebChromeClient() {

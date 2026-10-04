@@ -128,6 +128,22 @@ fun PkH5Screen(
 
     val pageColor = rememberH5PageColor()
 
+    val hostState = PkHostOrchestrator.state
+
+    // 入口 URL **只算一次**（★ 关键，2026-10-04）。
+    //
+    // 为什么不能每次重组都调 `h5Url()`：它按 pk-node 的 openPkPage 拼了
+    // `&t=<now>` 防缓存参数 —— 每次调用结果都不同。而 `update` 的判据是
+    // 「URL 变了才 loadUrl」，若 URL 每次都变 → **每次重组都 loadUrl → 页面无限刷新**。
+    //
+    // ⚠️ 必须定义在 `webView`（及其 WebViewClient）**之前** ——
+    // `shouldOverrideUrlLoading` 要用它当 `exceptUrl`（否则本页会被当成「新页面」自跳）。
+    val entryUrl = remember(hostState is PkHostOrchestrator.State.Ready, viewModel.reloadToken) {
+        if (hostState is PkHostOrchestrator.State.Ready) PkHostOrchestrator.h5Url() else null
+    }
+    // 用于「未就绪/出错」提示里展示的地址（与真正加载的那个保持一致）。
+    val targetUrl = entryUrl
+
     val webView = remember {
         WebView(context).apply {
             // 焦点策略：可聚焦（否则整页弹不出输入法）+ 移出前先 clearFocus
@@ -188,11 +204,15 @@ fun PkH5Screen(
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: WebResourceRequest?,
-                ): Boolean = handleScheme(request?.url?.toString() ?: return false, onFinish, onOpenChild)
-
+                ): Boolean = handleScheme(
+                    request?.url?.toString() ?: return false,
+                    onFinish,
+                    onOpenChild,
+                    exceptUrl = entryUrl,
+                )
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
                 override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
-                    url?.let { handleScheme(it, onFinish, onOpenChild) } ?: false
+                    url?.let { handleScheme(it, onFinish, onOpenChild, exceptUrl = entryUrl) } ?: false
             }
 
             webChromeClient = object : WebChromeClient() {
@@ -227,21 +247,6 @@ fun PkH5Screen(
             runCatching { webView.clearFocus() }
             runCatching { webView.stopLoading() }
         }
-    }
-
-    val hostState = PkHostOrchestrator.state
-    val targetUrl = PkHostOrchestrator.h5Url()
-
-    // 入口 URL **只算一次**（★ 关键，2026-10-04）。
-    //
-    // 为什么不能每次重组都调 `h5Url()`：它按 pk-node 的 openPkPage 拼了
-    // `&t=<now>` 防缓存参数 —— 每次调用结果都不同。而下面的 `update` 判据是
-    // 「URL 变了才 loadUrl」，若 URL 每次都变 → **每次重组都 loadUrl → 页面无限刷新**。
-    //
-    // 与 pk-node 一致：那个 URL 只在「打开 PK 页面」时拼一次。
-    // 重算时机 = 服务就绪（拿到 h5Base）+ 用户主动重试（reloadToken 变）。
-    val entryUrl = remember(hostState is PkHostOrchestrator.State.Ready, viewModel.reloadToken) {
-        if (hostState is PkHostOrchestrator.State.Ready) PkHostOrchestrator.h5Url() else null
     }
 
     val bg = pageColor.value ?: MaterialTheme.colorScheme.surfaceContainer
@@ -451,20 +456,31 @@ internal fun releaseWebView(view: WebView) {
  *
  * @return true 表示已消费该 URL（WebView 不得自行导航）
  */
-private fun handleScheme(
+internal fun handleScheme(
     url: String,
     onFinish: () -> Unit,
     onOpenChild: (String) -> Unit,
+    /**
+     * 「当前容器自己的 URL」。命中即返回 false 放行 ——
+     * 否则下级页的 `openWebView(self)` 会无限自跳（每跳一次压一个新容器）。
+     */
+    exceptUrl: String? = null,
 ): Boolean {
+    // ★ 2026-10-04：pk-node 的 closeWebView 在 App 里发 `leo://close`
+    //   （浏览器 iframe 里它才是 history.back()）。见 pk-h5-proxy.js 的 closeWebView。
     if (url.startsWith("leo://")) {
         val host = Uri.parse(url).host ?: return false
         if (host == "close" || host == "back" || host == "finish") {
+            AppLogger.i("PkH5", "H5 请求返回 → 交给导航：$url")
             onFinish()
             return true
         }
         // 其余自定义能力放行给 pk-node 的 JS 桥。
         return false
     }
+
+    // 自己：放行（同文档 hash 导航 / reload）。
+    if (exceptUrl != null && url == exceptUrl) return false
 
     // ★ 「新的 H5 页面」→ 由 App 导航开新容器（原生转场 + 预测性返回）。
     //   判据：本机同源下的**另一个文档**（PK H5 页面都在 /pk-h5 或 /pk-h5-cdn）。

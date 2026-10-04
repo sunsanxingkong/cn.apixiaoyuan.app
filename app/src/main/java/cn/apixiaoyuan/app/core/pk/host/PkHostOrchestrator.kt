@@ -448,6 +448,17 @@ object PkHostOrchestrator {
         // pk-node 侧已支持「宿主传了就生效、没传就回 0」，所以这里不传即可
         // 保持现状（与之前一致，不会回归）；哪天决定「由 H5 自己处理沉浸式」，
         // 只要把 App 的 padding 去掉、并在这里补 `&sbh=<px>` 就行。
+        // ★ 2026-10-04：告诉 H5「跑在 App 容器里」—— 决定 closeWebView 的返回语义。
+        //
+        // 浏览器（pk-node 管理后台 iframe）里所有页面共用一个历史栈，`history.back()`
+        // 是对的；而 App 里每个下级页是**独立 WebView**，`history.length === 1`，
+        // `history.back()` 什么都不做 → 表现就是「点 PK 主页返回键没反应」。
+        //
+        // 带上它之后，H5 的 closeWebView 会发 `leo://close`，由宿主接住：
+        // 入口容器 → 回 App 首页（RouteHome）；下级容器 → pop 回上一层。
+        if (!base.contains("__pkInApp=")) {
+            sb.append("&__pkInApp=1")
+        }
         sb.append("&t=").append(System.currentTimeMillis())
         return sb.toString()
     }

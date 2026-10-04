@@ -319,6 +319,25 @@ object PkHostOrchestrator {
             leoAccountId = primary?.id,
             linked = linked,
         ).also { state = it }
+            .also {
+                // ★★ 2026-10-04（用户要求）：**提前预热 WebView**，消除「进 H5 黑屏 1 秒」。
+                //
+                // 时机选在这里的原因：pk-node 已就绪 + h5Url() 已可用，
+                // 而用户此时多半还在 App 里点两下才进 PK 页 —— 正好把
+                // 「建 WebView + 首次加载」这件几百毫秒的事放到这段空闲里做。
+                //
+                // 必须在主线程建（WebView 只能在创建它的线程用），所以要 post。
+                val a = appCtx
+                if (a != null) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        // `h5Url()` 可能为 null（状态在 post 执行前变了）——
+                        // 拿不到地址就跳过预热，不要因此崩。
+                        runCatching {
+                            h5Url()?.let { u -> PkWebViewPool.warmUp(a, u) }
+                        }
+                    }
+                }
+            }
     }
 
     /**

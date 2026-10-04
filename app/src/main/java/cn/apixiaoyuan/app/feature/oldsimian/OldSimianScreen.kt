@@ -37,17 +37,16 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
- * 「这个开关还没接上」的统一后缀（2026-10-03）。
+ * PK 相关开关的接入方式（★ 2026-10-04 更新）。
  *
- * PK 页换成内置 node 版后，三个注入 H5 的脚本（`pk_auto_next.js` /
- * `pk_no_anim.js` / `pk_auto_stroke.js`）是照**旧容器**写的，
- * **尚未在新架构上实现**。开关置灰并在副标题上标出来 ——
- * 让用户明确知道「还没做」，而不是以为坏了。
+ * PK 页换成内置 node 版后，原先三个注入 H5 的脚本（`pk_auto_next.js` /
+ * `pk_no_anim.js` / `pk_auto_stroke.js`）是照**旧容器**写的。现在改为：
  *
- * ⚠️ 置灰只动 UI（`enabled = false`）：`OldSimianPrefs` 与 `PkJsInjector`
- * 都没改，所以**已经开着的人行为不变**，且实现后去掉 `enabled = false` 即可。
+ *  - `结束页自动化` / `自动提交画笔` —— 走内置 pk-node 的 `pkbot` 能力
+ *    （URL 参数 `?pkbot=autoNext,autoStroke`，由 `PkHostOrchestrator` 拼）；
+ *  - `去除排行榜展示动效` —— 仍由 [PkJsInjector] 注入 `pk_no_anim.js`
+ *    （只动 CSS/音频，与容器实现无关）。
  */
-private const val NOT_WIRED_NOTE = "（PK H5 功能尚未接入，暂不可用）"
 
 /**
  * 「老挂戏老叟」功能页（**底部「功能」tab 的根页**，见 `MainActivity` 的 pager）。
@@ -83,9 +82,9 @@ private const val NOT_WIRED_NOTE = "（PK H5 功能尚未接入，暂不可用�
  * |---|---|---|
  * | 练习（5 项） | **整段删 UI** | 用户明确要求；底层 `ExamViewModel` / `OldSimianPrefs` 未动 |
  * | PK · 刷 PK 对局入口 | **删** | 与刷分区「PK 刷对局」是**同一个** `RoutePkGrind`，纯重复 |
- * | PK · 结束页自动化 | **置灰** | 注入 `pk_auto_next.js`，新架构未实现 |
- * | PK · 去除排行榜动效 | **置灰** | 注入 `pk_no_anim.js`，新架构未实现 |
- * | PK · 自动提交画笔 | **置灰** | 注入 `pk_auto_stroke.js`，新架构未实现 |
+ * | PK · 结束页自动化 | **可用** | pk-node `autoNext`（URL 的 `pkbot=autoNext`）|
+ * | PK · 去除排行榜动效 | **可用** | App 侧注入 `pk_no_anim.js`（只动 CSS/音频）|
+ * | PK · 自动提交画笔 | **可用** | pk-node `autoStroke`（URL 的 `pkbot=autoStroke`）|
  * | PK · 显示刷轮数悬浮入口 | **删** | 2026-10-04 用户要求；开关无渲染点，连 pref 一起清 |
  * | H5 调试 · Eruda | 保留 | 用户明确要求保留 JS 控制台 |
  * | 分数（2 项） | **整段删 UI** | 与刷分区同源（同一 pref、同一 `RouteScorePump`） |
@@ -162,22 +161,32 @@ fun OldSimianScreen(
             //   ① 删除「刷 PK 对局」入口 —— 它跳 `RoutePkGrind`，而**刷分区**
             //      （[cn.apixiaoyuan.app.feature.grind.GrindScreen]）的「PK 刷对局」
             //      是**同一个路由**，纯重复入口。
-            //   ② 下面三项**注入 H5 的开关全部置灰**（用户要求：「还有其他关于 pk h5
-            //      页面的功能还没写，先把开关设为不可动」）。
+            //   ② 下面三项**已接入**（★ 2026-10-04，用户要求「把 tab 功能里的 PK
+            //      功能全部实现」）。
             //
-            //      它们注入的是 `assets/js/pk_auto_next.js` / `pk_no_anim.js` /
-            //      `pk_auto_stroke.js` —— 那三个脚本是照**旧容器**（App 自己发的请求 +
-            //      自己的桥）写的，PK 页换成内置 node 版后这些功能**尚未在新架构上实现**，
-            //      打开也不会生效。置灰而不是删除，是为了：
-            //        · 明确告知「还没做」而不是让用户以为坏了；
-            //        · 保留界面位置，实现后直接去掉 enabled=false 即可。
+            //      ## 接入方式：全部改走内置 pk-node 的 `pkbot` 能力
             //
-            //      ⚠️ `PkJsInjector` 本身**没改**（仍会按开关注入）—— 保持「只在 ui 层」。
+            //      PK 页换成内置 node 版后，原先那三个脚本（`assets/js/pk_auto_next.js`
+            //      / `pk_no_anim.js` / `pk_auto_stroke.js`）是照**旧容器**（App 自己发
+            //      请求 + 自己的桥）写的，在新架构上不成立。而内置 pk-node 自己就有
+            //      一套等价能力，由入口 URL 的 `?pkbot=` 驱动：
+            //
+            //        | 本页开关 | pk-node 能力 | pk-node 里的实现 |
+            //        |---|---|---|
+            //        | 视为正确答案 | `answer`    | `recognize` 桥回预期答案 |
+            //        | 自动提交画笔 | `autoStroke`| 对局页定时派发 touch 笔迹 |
+            //        | 结束页自动化 | `autoNext`  | 结算页点「继续 PK」 |
+            //
+            //      URL 由 `PkHostOrchestrator.h5Url()` 里的 `pkbotParam()` 拼（读的
+            //      就是本页这几个开关）。**所以本页只差「把开关放开」**。
+            //
+            //      ⚠️ 「去除排行榜展示动效」pk-node 没有对应能力（它只管答题链），
+            //      仍由 App 侧的 [PkJsInjector] 注入 `assets/js/pk_no_anim.js` ——
+            //      那个脚本只动 CSS/音频，与容器实现无关，继续有效。
             SectionCard(title = "PK") {
                 SwitchRow(
                     title = "结束页自动化",
-                    summary = "结算页自动开下一局（注入 H5 脚本，三级策略）" + NOT_WIRED_NOTE,
-                    enabled = false,
+                    summary = "结算页自动开下一局（走内置 pk-node 的 autoNext 能力）",
                     checked = OldSimianPrefs.autoNextRound,
                     onCheckedChange = {
                         OldSimianPrefs.autoNextRound = it
@@ -197,8 +206,7 @@ fun OldSimianScreen(
                 }
                 SwitchRow(
                     title = "去除排行榜展示动效",
-                    summary = "CSS 动画归零 + 音效静音（只动样式，不碰答题节奏）" + NOT_WIRED_NOTE,
-                    enabled = false,
+                    summary = "CSS 动画归零 + 音效静音（只动样式，不碰答题节奏）",
                     checked = OldSimianPrefs.noRankingAnim,
                     onCheckedChange = {
                         OldSimianPrefs.noRankingAnim = it
@@ -207,8 +215,7 @@ fun OldSimianScreen(
                 )
                 SwitchRow(
                     title = "自动提交画笔",
-                    summary = "题目页自动注入笔迹并触发提交（遍历 Vue 组件树找活体画板）" + NOT_WIRED_NOTE,
-                    enabled = false,
+                    summary = "题目页自动注入笔迹并触发提交（走内置 pk-node 的 autoStroke 能力）",
                     checked = OldSimianPrefs.pkStrokeEnabled,
                     onCheckedChange = {
                         OldSimianPrefs.pkStrokeEnabled = it

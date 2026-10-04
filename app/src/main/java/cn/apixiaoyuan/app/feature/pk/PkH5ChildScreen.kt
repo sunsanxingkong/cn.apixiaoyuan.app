@@ -144,7 +144,7 @@ fun PkH5ChildScreen(
                 // 它会让 WebView 采用 meta viewport 的 `height=device-height`，
                 // 该值被解析成 0 → `100vh` / `100%` 全塌（榜单空白、弹窗溢出）。
                 // 详见 PkH5Screen 里的完整说明。
-                loadWithOverviewMode = false
+                loadWithOverviewMode = true
             }
 
             webViewClient = object : WebViewClient() {
@@ -261,22 +261,13 @@ fun PkH5ChildScreen(
                     if (error == null && !loadedOnce) {
                         loadedOnce = true
                         AppLogger.i("PkH5Child", "加载下级 H5：$url")
-                        // ★★ 2026-10-04：**必须等 View 完成测量再加载** —— 下级页是在导航转场
-                        // 动画期间创建的，此时尺寸还是 0×0，若立刻 loadUrl，
-                        // Blink 会把 `100vh` / `height:100%` 的初始包含块固化成 0
-                        // → 荣誉榜整片空白（真机实证：honor-roll 页 vh=0、入口页 vh=853）。
-                        // 详见 loadUrlWhenMeasured 的注释。
-                        loadUrlWhenMeasured(v, url, "PkH5Child")
+                        v.loadUrl(url)
                     }
                 },
                 onRelease = { v -> releaseWebView(v) },
             )
 
-            // ★ 2026-10-04（用户要求）：首屏加载动画（与入口容器一致）。
-            //   叠在 WebView 之上，加载完（progress=100 或已 loadUrl）自动消失。
-            if (firstLoading) {
-                cn.apixiaoyuan.app.core.design.component.H5LoadingDots(pageColor = bg)
-            }
+            
 
             error?.let { msg ->
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

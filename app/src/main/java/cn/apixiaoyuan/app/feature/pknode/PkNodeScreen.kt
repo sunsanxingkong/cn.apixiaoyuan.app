@@ -135,7 +135,7 @@ fun PkNodeScreen(navController: AppNavController) {
                 // 它会让 WebView 采用 meta viewport 的 `height=device-height`，
                 // 该值被解析成 0 → `100vh` / `100%` 全塌（榜单空白、弹窗溢出）。
                 // 详见 PkH5Screen 里的完整说明。
-                loadWithOverviewMode = false
+                loadWithOverviewMode = true
             }
             // 不需要任何 addJavascriptInterface：管理后台是纯网页，
             // 与 PK H5 的 window 桥无关，宿主插一手只会添乱。

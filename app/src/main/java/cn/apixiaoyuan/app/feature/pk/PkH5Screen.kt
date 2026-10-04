@@ -48,6 +48,7 @@ import cn.apixiaoyuan.app.core.design.component.rememberH5PageColor
 import cn.apixiaoyuan.app.core.design.component.statusBarTopDp
 import cn.apixiaoyuan.app.core.log.AppLogger
 import cn.apixiaoyuan.app.core.oldsimian.PkJsInjector
+import cn.apixiaoyuan.app.core.pk.host.PkWebViewPool
 import cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -146,8 +147,31 @@ fun PkH5Screen(
     // 用于「未就绪/出错」提示里展示的地址（与真正加载的那个保持一致）。
     val targetUrl = entryUrl
 
+    // 预热实例「已经加载好的 URL」。
+    //
+    // 用 `remember { mutableStateOf(...) }` 而不是普通局部变量：它在首次组合时被赋值，
+    // 之后的 **`update` 回调**（另一个时刻、另一次重组）要读它 —— 普通局部变量
+    // 在那个闭包里可能已被后续重组覆盖，而 state 始终读得到。
+    val warmedUrl = remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+
+    // ★★ 2026-10-04（用户要求「搞个页面预加载吧，现在每次打开 h5 都要黑屏一秒」）：
+    //   **优先复用预热池里的 WebView**。
+    //
+    // 预热实例在 `PkHostOrchestrator` 置 Ready 后就已建好并**预加载过入口页**
+    // （见 `PkWebViewPool.warmUp`）。这里拿到的实例：
+    //   · 渲染进程已就绪（省掉那 ~1 秒黑屏）；
+    //   · 页面已渲染完成 —— 若 URL 与预热时一致，**连 loadUrl 都不用再发**。
+    //
+    // 拿不到（未预热 / 超时 / 已被取走）时退回新建，行为与以前完全一致。
+    // `remember` 保证只在首次组合时取一次，之后重组不会重复取。
     val webView = remember {
-        WebView(context).apply {
+        val warmed = runCatching { PkWebViewPool.take(context) }.getOrNull()
+        // 预热实例的 URL：用于 update 里判断「是否还需要 loadUrl」。
+        warmedUrl.value = warmed?.url
+        if (warmed != null) {
+            AppLogger.i("PkH5", "复用预热实例（省一次冷启动）")
+        }
+        (warmed?.view ?: WebView(context)).apply {
             // 焦点策略：可聚焦（否则整页弹不出输入法）+ 移出前先 clearFocus
             //（「移除时还持着焦点」会触发 Compose 重入合成崩溃）。
             isFocusable = true
@@ -214,7 +238,7 @@ fun PkH5Screen(
                 // 关掉它之后：`useWideViewPort = true` 仍然生效（宽度照旧按
                 // `device-width` 自适应，这才是修「排行榜溢出屏幕」的那一项），
                 // 而高度不再被 `device-height` 污染 → 与浏览器行为一致。
-                loadWithOverviewMode = false
+                loadWithOverviewMode = true
                 // UA 由 pk-node 自己伪装，宿主不追加（否则出现两段版本号）。
                 AppLogger.i("PkH5", "WebView UA = $userAgentString")
             }
@@ -394,29 +418,33 @@ fun PkH5Screen(
                     val target = url to viewModel.reloadToken
                     if (viewModel.webError == null && target != loadedTarget) {
                         loadedTarget = target
+                        // ★★ 2026-10-04：复用预热实例时**仍然照常 loadUrl**。
+                        //
+                        // # 为什么不「跳过 loadUrl」
+                        //
+                        // 预热实例上的 `WebViewClient` 是**页面加载完之后**才挂上去的
+                        // （在下面的 `apply { }` 里），所以预热那一次加载的
+                        // `onPageFinished` 不会被本容器收到。若在这里跳过 loadUrl：
+                        //   · `PkJsInjector`（Eruda / 去动效）不会执行；
+                        //   · 页面文本 / 桥对象 / 底色探针不会上报（排查会失明）。
+                        // 即「省了一次加载，但丢掉所有加载后钩子」—— 不可取。
+                        //
+                        // # 那预加载省了什么
+                        //
+                        // 省的是**最贵的一段**：`WebView` 构造 + Chromium 渲染进程
+                        // 冷启动（几百毫秒）。这一段在预热时已经付过了，进页面时
+                        // 直接复用同一个渲染进程，黑屏显著变短。
+                        // 页面本身照常重新加载，保证每次进页面都是干净状态 + 全量钩子。
+                        warmedUrl.value = null
                         AppLogger.i("PkH5", "加载内置 pk-node H5：$url")
                         clearHostCookies()
-                        // ★★ 2026-10-04 修正：**必须等 View 真正测量完成再加载**。
-                        //
-                        // 若在 View 尺寸还是 0×0 时（导航转场动画期间）就 loadUrl，
-                        // Blink 会用「0 高视口」初始化视图并把 `100vh` / `height:100%`
-                        // 的初始包含块**固化**成 0 —— 表现为荣誉榜整片空白、弹窗溢出。
-                        //
-                        // 真机日志实证：入口容器（转场后加载）vh=853 ✔，
-                        // 下级容器（转场中加载）vh=0 ✘。详见 loadUrlWhenMeasured 的注释。
-                        loadUrlWhenMeasured(v, url, "PkH5")
+                        v.loadUrl(url)
                     }
                 },
                 onRelease = { v -> releaseWebView(v) },
             )
 
-            // ★ 2026-10-04（用户要求「顺便给页面来个加载动画」）：
-            //   首屏加载期间的居中脉冲圆点。叠在 WebView **之上** —— 页面加载完
-            //   （webProgress=100 或已 loadUrl）时 firstLoading 变 false，自然消失。
-            //   颜色按页面底色取对比色（H5LoadingDots 内部判亮度），深浅底都清楚。
-            if (firstLoading) {
-                cn.apixiaoyuan.app.core.design.component.H5LoadingDots(pageColor = bg)
-            }
+            
 
             // ★ 2026-10-04（用户要求）：**删掉「正在启动内置服务…」的居中提示卡**。
             //

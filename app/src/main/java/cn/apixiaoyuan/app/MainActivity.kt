@@ -43,8 +43,20 @@ import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+
+        // ★ 2026-10-04：**启动清单闸门**（读远端静态 JSON 决定本次是否继续启动）。
+        //
+        // 为什么放在这个位置（`super.onCreate` 之后、`enableEdgeToEdge` / `setContent` 之前）：
+        //   · 它是**同步**的（最多阻塞 GATE_TIMEOUT_MS，且命中本地缓存时完全不联网、不加延迟），
+        //     必须在 UI 起画之前出结果，才不会出现「先闪一下界面再退出」；
+        //   · 放在 `setContent` 之后会先组合一遍 UI（开销 + 可见闪动），没意义；
+        //   · 放在 `super.onCreate` 之前则拿不到可用的 Activity 上下文。
+        //
+        // 语义与「取不到一律放行」的判据见 LaunchManifest 的类注释（那里有完整说明）。
+        cn.apixiaoyuan.app.core.launch.LaunchManifest.gate(this)
+
+        enableEdgeToEdge()
         setContent {
             ReverseOldGuyTheme {
                 AppShell()

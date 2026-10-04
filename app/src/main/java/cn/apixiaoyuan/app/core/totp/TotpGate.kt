@@ -109,6 +109,50 @@ object TotpGate {
     /** 本次会话是否已通过验证（进程内存 + prefs 双读，避免弹窗重复）。 */
     fun isVerified(): Boolean = prefs().getBoolean(KEY_VERIFIED, false)
 
+    // ==================== 进群认证（与 TOTP 二选一） ====================
+    //
+    // ★ 2026-10-04（用户要求）：「给 totp 认证下面再加一个进群认证，
+    //   然后任意通过一个认证即可」。
+    //
+    // ## 它是什么
+    //
+    // 除了「用验证器 App 算动态码」之外，再给一条**门槛更低的**通路：
+    // 用户加入交流群（群号见 [GROUP_NUMBERS]）即可放行。
+    //
+    // ## 为什么用「加群答案」当凭据
+    //
+    // 群是**需要验证才能进**的（加群答案只有拿到本 App 的人才知道），
+    // 所以「能说出加群答案」等价于「已经在群里」—— 这正是「进群认证」
+    // 的语义（与 TOTP 一样，都是「证明你是自己人」）。
+    //
+    // ⚠️ 诚实说明其安全强度：这条通路**比 TOTP 弱**（答案是一串固定数字、
+    //    不随时间变化），且与本文件的 TOTP 密钥一样是**本地硬编码**的。
+    //    它定位是「省事通路」而**不是**安全边界 —— 需要强门禁时请只用 TOTP。
+    //    两条通路共用同一个 [KEY_VERIFIED] 标记（任一通过即视为已认证）。
+
+    /** 进群认证：加群时用的验证答案。 */
+    private const val GROUP_PASS = "6767789113"
+
+    /**
+     * 交流群号（展示给用户；加群时验证答案见 [GROUP_PASS]）。
+     *
+     * 多个群是**冗余**的：任一都能加、任一都能通过 —— 一个满了或搜不到时
+     * 用户还有另一个可选。
+     */
+    val GROUP_NUMBERS = listOf("994173459", "1109588491")
+
+    /**
+     * 校验进群答案。通过则写入与 TOTP 相同的「已认证」标记。
+     *
+     * @param input 用户输入的加群验证答案
+     * @return true = 通过（调用方应放行）
+     */
+    fun verifyGroup(input: String): Boolean {
+        if (input.trim() != GROUP_PASS) return false
+        prefs().edit().putBoolean(KEY_VERIFIED, true).apply()
+        return true
+    }
+
     /** 重置验证状态（下次启动重新弹窗）。密钥不变。 */
     fun resetVerified() {
         prefs().edit().putBoolean(KEY_VERIFIED, false).apply()

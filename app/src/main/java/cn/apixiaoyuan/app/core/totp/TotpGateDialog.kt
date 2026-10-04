@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -52,6 +53,10 @@ fun TotpGateDialog(onPassed: () -> Unit) {
     var error by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
 
+    // ★ 2026-10-04：第二条通路 —— 进群认证（与 TOTP **任一通过即可**）。
+    var groupInput by remember { mutableStateOf("") }
+    var groupError by remember { mutableStateOf(false) }
+
     // 倒计时进度：1.0 → 0.0 线性走完一个 30s 步长。
     var progress by remember {
         mutableFloatStateOf(TotpGate.secondsRemaining() / TotpGate.STEP_SECONDS.toFloat())
@@ -65,13 +70,21 @@ fun TotpGateDialog(onPassed: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = { /* 门禁：不允许关闭跳过 */ },
-        title = { Text("TOTP真人验证器") },
+        title = { Text("身份验证") },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
             ) {
+                Text(
+                    "以下两种方式**任选其一**通过即可进入。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text("TOTP 验证器", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
                 Text(
                     "首次使用请将以下密钥录入您的验证器 App（Aegis / Google Authenticator 等），此后输入其显示的 6 位动态码即可。",
                     style = MaterialTheme.typography.bodySmall,
@@ -121,6 +134,60 @@ fun TotpGateDialog(onPassed: () -> Unit) {
                     progress = { progress },
                     modifier = Modifier.fillMaxWidth(),
                 )
+
+                // ===== 进群认证（★ 2026-10-04 用户要求：「给 totp 认证下面再加一个
+                //       进群认证，然后任意通过一个认证即可」）=====
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "进群认证",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "不想用验证器？加入交流群即可通过。群号：" +
+                        TotpGate.GROUP_NUMBERS.joinToString(" 或 ") +
+                        "。加群时会问一个验证答案，把那个答案填在下面。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                // 群号可点复制（省得手抄错）。
+                Row {
+                    TotpGate.GROUP_NUMBERS.forEach { num ->
+                        TextButton(onClick = {
+                            clipboard.setText(AnnotatedString(num))
+                        }) { Text("复制群号 $num") }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = groupInput,
+                    onValueChange = {
+                        // 答案是数字串，但长度不限制（不假设位数）。
+                        if (it.all { c -> c.isDigit() }) {
+                            groupInput = it
+                            groupError = false
+                        }
+                    },
+                    label = { Text("加群验证答案") },
+                    isError = groupError,
+                    supportingText = if (groupError) {
+                        { Text("答案不正确，请确认已按群公告的答案加群") }
+                    } else null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                // 行内按钮：单独触发「进群认证」这条通路（与底部 TOTP 的「验证」并列）。
+                TextButton(
+                    enabled = groupInput.isNotBlank(),
+                    onClick = {
+                        if (TotpGate.verifyGroup(groupInput)) onPassed() else groupError = true
+                    },
+                ) { Text("使用进群认证通过") }
             }
         },
         confirmButton = {

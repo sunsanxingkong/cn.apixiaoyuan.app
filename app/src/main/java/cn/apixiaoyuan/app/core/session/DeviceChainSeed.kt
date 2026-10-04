@@ -40,7 +40,14 @@ object DeviceChainSeed {
 
     private const val TAG = "DeviceChainSeed"
     private const val PREF_NAME = "leo_device_chains_seed"
-    private const val KEY_IMPORTED = "seed_imported_v1"
+    // ★ 2026-10-04：标记从 v1 → **v2**。
+    //
+    // 种子从 3 条扩到 34 条（新增 31 条真机设备链）。
+    // 若不 bump：老用户 `seed_imported_v1` 已落盘 → `ensureImported` 直接 return 0
+    // → 新链永远不会进池，「内置链全员可用」形同虚设。
+    // 用 v2 作新键：老用户首次启动会**再导入一次**（upsert 按 ks_deviceid 去重，
+    // 已有的 3 条不会重复、也不被覆盖），新链则补进池。
+    private const val KEY_IMPORTED = "seed_imported_v2"
     private const val ASSET_NAME = "device_chains_seed.json"
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -63,7 +70,7 @@ object DeviceChainSeed {
     /**
      * 首次启动时把内置设备链并入池。
      *
-     * 幂等：`seed_imported_v1` 标记落盘后不再执行。调用点放在
+     * 幂等：`seed_imported_v2` 标记落盘后不再执行（见 [KEY_IMPORTED] 的说明）。调用点放在
      * [DeviceChainPool.init] 之后、任何网络请求之前（见 `App.onCreate`）。
      *
      * @param force 忽略标记强制重导（供「恢复内置设备链」入口使用）

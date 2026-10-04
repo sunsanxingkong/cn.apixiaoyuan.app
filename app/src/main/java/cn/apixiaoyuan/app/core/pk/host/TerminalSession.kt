@@ -134,7 +134,7 @@ class TerminalSession internal constructor(
         private set
 
     val isRunning: Boolean
-        get() = process?.isAlive == true
+        get() = ProcessCompat.isAlive(process)
 
     /** UI 上的标题。 */
     val title: String get() = "终端 $id"
@@ -240,7 +240,7 @@ class TerminalSession internal constructor(
             //   字符画作为「新会话」的视觉分隔（多开终端时一眼能看出哪块是哪次）。
             SXD_ART.forEach { append(it.padEnd(ART_WIDTH)) }
             append("")
-            Log.i(logTag, "终端已启动 pidAlive=${p.isAlive}")
+            Log.i(logTag, "终端已启动 pidAlive=${ProcessCompat.isAlive(p)}")
             true
         }.getOrElse {
             Log.e(logTag, "启动终端失败：${it.message}", it)
@@ -321,7 +321,7 @@ class TerminalSession internal constructor(
      */
     fun interrupt(): Boolean {
         val p = process ?: return false
-        if (!p.isAlive) return false
+        if (!ProcessCompat.isAlive(p)) return false
         val hostPid = readShellPid()
         if (hostPid <= 0) {
             append("[Ctrl+C] 还拿不到 shell 的 pid（稍后再试一次）")
@@ -438,7 +438,7 @@ class TerminalSession internal constructor(
         }
         runCatching {
             p.destroy()
-            if (!p.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly()
+            if (!ProcessCompat.waitFor(p, 2, java.util.concurrent.TimeUnit.SECONDS)) ProcessCompat.destroyForcibly(p)
         }
         runCatching { pidFile.delete() }
     }

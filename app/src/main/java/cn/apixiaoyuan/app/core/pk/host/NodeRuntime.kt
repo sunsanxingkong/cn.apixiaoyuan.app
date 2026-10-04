@@ -51,7 +51,7 @@ object NodeRuntime {
 
     /** 是否已启动（进程活着）。 */
     val isRunning: Boolean
-        get() = process?.isAlive == true
+        get() = ProcessCompat.isAlive(process)
 
     /** node 可执行文件路径（nativeLibraryDir/libnode.so）。 */
     private fun nodeExe(ctx: Context): File =
@@ -180,7 +180,7 @@ object NodeRuntime {
                 }
             }.apply { isDaemon = true; name = "pk-node-wait" }.start()
 
-            logI("内置 node 已启动：alive=${p.isAlive} port=$DEFAULT_PORT dir=${workspaceDir.absolutePath}")
+            logI("内置 node 已启动：alive=${ProcessCompat.isAlive(p)} port=$DEFAULT_PORT dir=${workspaceDir.absolutePath}")
             true
         }.getOrElse {
             logE("启动内置 node 失败：${it.message}", it)
@@ -194,7 +194,7 @@ object NodeRuntime {
         process = null
         runCatching {
             p.destroy()
-            if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly()
+            if (!ProcessCompat.waitFor(p, 3, TimeUnit.SECONDS)) ProcessCompat.destroyForcibly(p)
         }.onFailure { Log.w(TAG, "停止内置 node 失败：${it.message}") }
         logI("内置 node 已停止")
     }

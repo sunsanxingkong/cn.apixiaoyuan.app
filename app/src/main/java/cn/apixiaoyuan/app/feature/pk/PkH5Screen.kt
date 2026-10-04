@@ -45,8 +45,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.core.view.WindowCompat
-import cn.apixiaoyuan.app.core.design.component.LocalTopBarInset
 import cn.apixiaoyuan.app.core.design.component.isDarkColor
 import cn.apixiaoyuan.app.core.design.component.probeH5PageColor
 import cn.apixiaoyuan.app.core.design.component.rememberH5PageColor
@@ -320,6 +321,14 @@ fun PkH5Screen(
     val enterPx = screenW * spec.enterFraction
     val coverPx = screenW * spec.coverFraction
 
+    // ★★ 2026-10-04 修正：用**系统状态栏的真实高度**，不要用 LocalTopBarInset。
+    //   LocalTopBarInset 由 AppScaffold 下发（是「顶栏高度」），而 PK 页是 NavHost 里
+    //   的全屏二级页，**不在 AppScaffold 里** —— 它恒为 0.dp，等于没下移（我上一版就栽这）。
+    //   WindowInsets.statusBars.getTop(density) 是本项目已验证可用的取法。
+    val statusBarTopDp = with(LocalDensity.current) {
+        WindowInsets.statusBars.getTop(this).toDp()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -344,7 +353,8 @@ fun PkH5Screen(
                 factory = { webView },
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(top = LocalTopBarInset.current)
+                    // 顶部让出状态栏那一条（露出的就是根 Column 的 background(bg) = 纯色填充）。
+                    .padding(top = statusBarTopDp)
                     // 进入方向的原生转场：动的是 AndroidView 这个 View 的 graphicsLayer，
                     // **不动 WebView 内部、不动网页**（用户要求「只在 app 中使用网页没有动画」）。
                     .graphicsLayer {
@@ -376,11 +386,10 @@ fun PkH5Screen(
             // 局限（如实说明）：拿不到旧 H5 的画面快照（`onPageStarted` 时旧内容已清空），
             // 所以被覆盖层只能用底色代替 —— 视差只出现在收尾那一次。
             if (navAnim.visible && !navAnim.entering) {
-                val insetsPx = with(LocalDensity.current) { LocalTopBarInset.current.toPx() }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(with(LocalDensity.current) { insetsPx.toDp() })
+                        .height(statusBarTopDp)
                         .align(Alignment.TopCenter)
                         .graphicsLayer {
                             translationX = (1f - t) * -coverPx

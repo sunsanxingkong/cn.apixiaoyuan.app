@@ -261,11 +261,12 @@ fun PkNodeScreen(navController: AppNavController) {
                 onRelease = { view -> releaseWebView(view) },
             )
 
+            // ★ 2026-10-04（用户要求）：与 PK 页一致 —— **删掉「正在启动内置服务…」提示卡**。
+            //   内置 node 现在在 App 启动时就预热（见 `App.onCreate`），
+            //   进本页时基本已 Ready；偶尔没就绪就让 WebView 空着，
+            //   不要糊一张居中卡片（转场落地瞬间会闪一下，就是用户说的「弹窗」）。
+            //   保留 Failed（真出事才提示）。
             when (hostState) {
-                PkHostOrchestrator.State.Idle,
-                PkHostOrchestrator.State.Starting,
-                -> Notice("正在启动内置服务…", "首次启动需要解压并拉起 node（约 2 秒）", busy = true)
-
                 is PkHostOrchestrator.State.Failed -> Notice(
                     title = "内置服务启动失败",
                     detail = hostState.message,
@@ -276,10 +277,11 @@ fun PkNodeScreen(navController: AppNavController) {
                     },
                 )
 
-                is PkHostOrchestrator.State.Ready -> if (error == null && loadedTarget == null) {
-                    // 就绪但还没触发加载（LaunchedEffect 写 cookie 中）——短暂提示。
-                    Notice("正在准备管理后台…", baseUrl, busy = true)
-                }
+                // Idle / Starting / Ready-准备中：什么都不画（见上面的说明）。
+                PkHostOrchestrator.State.Idle,
+                PkHostOrchestrator.State.Starting,
+                is PkHostOrchestrator.State.Ready,
+                -> Unit
             }
 
             error?.let { msg ->

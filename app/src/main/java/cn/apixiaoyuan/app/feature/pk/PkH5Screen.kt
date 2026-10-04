@@ -331,15 +331,23 @@ fun PkH5Screen(
                 onRelease = { v -> releaseWebView(v) },
             )
 
+            // ★ 2026-10-04（用户要求）：**删掉「正在启动内置服务…」的居中提示卡**。
+            //
+            // 用户原话：「把 pk 页面的拉起提示弹窗删了」。
+            //
+            // 为什么现在能删、也应该删：
+            //   · pk-node 已改为 **App 启动时预热**（见 `App.onCreate`）——
+            //     用户从主页点到 PK 页，中间至少隔一次点击 + 一次原生转场，
+            //     这点时间足够 node 起完；真到了这一步几乎必然已经 Ready。
+            //   · 即使偶尔还没就绪，**空着 WebView 1~2 秒**也比糊一张居中的
+            //     「正在启动…」卡片好 —— 后者会在转场落地的瞬间闪一下再消失，
+            //     正是用户说的「弹窗」。
+            //   · 状态本身没丢：Orchestrator 的日志（`PkHostOrchestrator` tag）
+            //     全程记录 Starting/Ready/Failed，排查时看日志即可。
+            //
+            // 保留的只有**失败**分支（那不是「拉起提示」，是真做不了事了）：
+            // Failed / 「Ready 但没拿到地址」→ 仍给一块提示 + 重试按钮。
             when (hostState) {
-                PkHostOrchestrator.State.Idle,
-                PkHostOrchestrator.State.Starting,
-                -> HostNotice(
-                    title = "正在启动内置服务…",
-                    detail = "首次启动需要解压并拉起 node（约 2 秒）",
-                    busy = true,
-                )
-
                 is PkHostOrchestrator.State.Failed -> HostNotice(
                     title = "内置服务启动失败",
                     detail = hostState.message,
@@ -358,6 +366,11 @@ fun PkH5Screen(
                         AppLogger.w("PkH5", "pk-node 里还没有小猿账号 —— PK 页会显示未登录。")
                     }
                 }
+
+                // Idle / Starting：**什么都不画**，让位于 WebView（见上面的说明）。
+                PkHostOrchestrator.State.Idle,
+                PkHostOrchestrator.State.Starting,
+                -> Unit
             }
 
             viewModel.webError?.let { err ->
@@ -412,12 +425,11 @@ private fun clearHostCookies() {
     }
 }
 
-/** 「内置服务启动中 / 失败」的提示卡。 */
+/** 「内置服务启动失败 / 地址缺失」的提示卡。 */
 @Composable
 private fun HostNotice(
     title: String,
     detail: String,
-    busy: Boolean = false,
     actionText: String? = null,
     onAction: (() -> Unit)? = null,
 ) {
@@ -427,10 +439,6 @@ private fun HostNotice(
                 modifier = Modifier.padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                if (busy) {
-                    CircularProgressIndicator()
-                    Spacer(Modifier.height(14.dp))
-                }
                 Text(text = title, style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(6.dp))
                 Text(

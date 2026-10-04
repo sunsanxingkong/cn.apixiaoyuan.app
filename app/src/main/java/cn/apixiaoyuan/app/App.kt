@@ -147,5 +147,20 @@ class App : Application() {
         // 上次的设置回填到 App 的同名字段，保证首帧就是用户的选择，
         // 不会先闪一下默认紫再变。放最后，不干扰网络与会话链路。
         cn.apixiaoyuan.app.core.design.theme.ThemePrefs.init(this)
+
+        // ★ 2026-10-04（用户要求）：**开机即拉起内置 pk-node**，不再等进入 PK 页。
+        //
+        // 用户原话：「每次打开应用应该自动拉起 pk-node 而不是进入 pk 页面再拉起」。
+        //
+        // 放在**最后**：它要解压工作区（首启约 2.5MB 磁盘 IO）+ 起 node 进程
+        // + 最多 20s 的端口轮询，是整个 onCreate 里最重的一步；放前面会拖慢
+        // 所有初始化。而且它**异步**（startAsync 内部起协程），不阻塞首帧。
+        //
+        // 为什么必须异步、且不能在这里阻塞：
+        //   · `startBlocking` 里有磁盘 IO + HTTP 轮询，主线程调用必 ANR；
+        //   · `PkHostOrchestrator.startAsync` 是幂等的（内部 started 门禁），
+        //     所以即便用户随后立刻进 PK 页（那里也会调一次），也只会跑一遍。
+        runCatching { cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator.startAsync(this) }
+            .onFailure { AppLogger.w("App", "开机预热 pk-node 失败：${it.message}") }
     }
 }

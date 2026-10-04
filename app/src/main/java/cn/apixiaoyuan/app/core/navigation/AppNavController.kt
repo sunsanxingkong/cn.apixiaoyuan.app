@@ -39,6 +39,14 @@ class AppNavController internal constructor(
      * 避免双击入口压出两层同样的页面。
      */
     fun navigate(key: NavKey) {
+        // ★ 按「路由值」去重（**不能按类型**）。
+        //
+        // 踩过的坑：曾想改成「栈顶同类路由就不压」来防重复压栈，但那会**误伤正常流程** ——
+        // 对局页与结算页都是 `RoutePkH5`（只是 url 不同），按类型去重的话
+        // 「对局 → 结算」这一跳会被直接吞掉，结算页永远打不开。
+        //
+        // 按值（含 url）去重就够了：H5 重复触发同一个 `openWebView` 会被挡掉，
+        // 而「对局 → 结算」url 不同，正常压栈。
         if (backStack.lastOrNull() == key) return
         backStack.add(key)
     }
@@ -78,6 +86,41 @@ class AppNavController internal constructor(
         if (keep < 0) return false
         while (backStack.size > keep + 1) backStack.removeAt(backStack.lastIndex)
         return true
+    }
+
+    /**
+     * 把**中间层**弹掉，让 [keepIndexInclusive] 之上的层级只剩一层。
+     *
+     * ★ 2026-10-04 新增（用户要求）：「PK 打完跳结算后，可以关掉 PK 页面的容器，
+     * 只保留主页和结算页面的容器 —— 这样从结算页返回就不会再回到 PK 页」。
+     *
+     * 场景：`主页 → PK 容器 → 对局容器 → 结算容器`。
+     * 结算页出现时，中间那两层（PK、对局）已经没有意义了；用户从结算返回，
+     * 直接回主页才对。但结算页还必须**留在栈里**（用户可能还要在结算页操作，
+     * 或者再点「继续PK」）。
+     *
+     * 所以不能「全部弹掉」，而是：**只保留结算（栈顶）+ 主页（它下面那层）**，
+     * 把中间的 PK / 对局整段移除。
+     *
+     * ```
+     * 之前：[Home, Pk, PkH5(对局), PkH5(结算)]
+     * 之后：[Home,           PkH5(结算)]
+     * ```
+     *
+     * @param keepIndexInclusive 结果栈顶相对于当前栈的下标（从 0 计）。
+     *        传 `1` 表示「最终只留两层：最底层 + 当前栈顶」。
+     * @return 是否真的移除了东西
+     */
+    fun dropIntermediateLayers(keepIndexInclusive: Int = 1): Boolean {
+        if (keepIndexInclusive < 0) return false
+        // 目标：把 [keepIndexInclusive, lastIndex) 这一段（不含栈顶）移除。
+        var removed = false
+        while (backStack.size - 1 > keepIndexInclusive) {
+            backStack.removeAt(keepIndexInclusive)
+            removed = true
+            if (backStack.size <= keepIndexInclusive + 1) break
+        }
+        return removed
     }
 
     private var lastPopTime = 0L

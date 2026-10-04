@@ -97,6 +97,34 @@ fun PkH5ChildScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var loadedOnce by remember { mutableStateOf(false) }
 
+    /**
+     * 把 H5 要开的页面压成**新的 H5 容器**（三级页也走这条）。
+     *
+     * ★ 2026-10-04（用户要求）：「三级页面跳转应该也要覆盖新容器」。
+     *   之前只有入口容器接了打开逻辑，下级容器（荣誉榜 → 收到的赞这种）没接，
+     *   于是在同一个 WebView 里同窗口跳、没有容器也没有转场。现在两级都接。
+     *
+     * ★ 同时处理「跳到结算页就折叠中间层」（用户要求）：
+     *   跳到 `result.html` 系列时，把中间那几层（PK 入口 / 对局）折掉，
+     *   只留 `[最底层, 结算页]` —— 这样从结算页返回直接回主页，
+     *   不会再退回 PK / 对局页。
+     *
+     * ⚠️ 必须是**值捕获稳定**的 lambda：它被 `shouldOverrideUrlLoading` 持有，
+     *   而 `remember` 让它在整个容器生命周期内只创建一次（navController 是不变的）。
+     */
+    val openChildInNewContainer: (String) -> Unit = remember {
+        { child: String ->
+            navController.navigate(cn.apixiaoyuan.app.core.navigation.RoutePkH5(child))
+            if (isPkResultUrl(child)) {
+                val dropped = navController.dropIntermediateLayers(1)
+                AppLogger.i(
+                    "PkH5Child",
+                    "到达结算页 → 只保留「最底层 + 结算页」，折掉中间层=$dropped",
+                )
+            }
+        }
+    }
+
     val webView = remember {
         WebView(context).apply {
             isFocusable = true
@@ -146,28 +174,13 @@ fun PkH5ChildScreen(
                 ): Boolean = handleScheme(
                     request?.url?.toString() ?: return false,
                     onFinish = { navController.popBackStack() },
-                    onOpenChild = { child ->
-                        navController.navigate(
-                            cn.apixiaoyuan.app.core.navigation.RoutePkH5(child),
-                        )
-                    },
+                    onOpenChild = openChildInNewContainer,
                     exceptUrl = url,
                 )
 
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
                 override fun shouldOverrideUrlLoading(view: WebView?, u: String?): Boolean =
-                    u?.let {
-                        handleScheme(
-                            it,
-                            onFinish = { navController.popBackStack() },
-                            onOpenChild = { child ->
-                                navController.navigate(
-                                    cn.apixiaoyuan.app.core.navigation.RoutePkH5(child),
-                                )
-                            },
-                            exceptUrl = url,
-                        )
-                    } ?: false
+                    u?.let { handleScheme(it, onFinish = { navController.popBackStack() }, onOpenChild = openChildInNewContainer, exceptUrl = url) } ?: false
             }
 
             webChromeClient = object : WebChromeClient() {

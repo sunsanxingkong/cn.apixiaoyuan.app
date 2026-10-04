@@ -495,3 +495,28 @@ internal fun handleScheme(
 
     return false
 }
+
+/**
+ * 是不是**结算页**（PK 打完那一屏）。
+ *
+ * ★ 2026-10-04 新增（用户要求）：
+ * > 「PK 打完跳转结算后就可以关闭 PK 页面的容器，只保留主页和结算页面的容器了。
+ * >   这样从结算页面返回就不会继续回到 PK 页面了」
+ *
+ * 判据来自 H5 源码（`useNavigation-legacy.C-iCgWHr.js`，它拼这些 URL 去 openWebView）：
+ *
+ * | 页面 | URL |
+ * |---|---|
+ * | 口算/诗词对局结算 | `/bh5/leo-web-oral-pk/result.html?pkIdStr=…` |
+ * | 活动结算 | `/bh5/leo-web-oral-pk/pk-activity-result.html?…` |
+ * | 道具赛结算 | `/bh5/leo-web-oral-pk/prop-result.html?pkIdStr=…` |
+ *
+ * 注意只认**路径**里的 `result.html` 系列，不认 query（`isFromHistory=true` 是
+ * 「从历史进结算」，路径仍是 result.html）。
+ */
+internal fun isPkResultUrl(url: String): Boolean {
+    val u = url.substringBefore('#')
+    return u.contains("/result.html") ||
+        u.contains("pk-activity-result.html") ||
+        u.contains("/prop-result.html")
+}

@@ -68,7 +68,19 @@ fun PkScreen(
             //          → 预测性返回 → 退回主页」。
             // 之前 H5 的 openWebView 被 pk-node 实现成同窗口 `location.href`，
             // 宿主在这里接住它、改走 App 导航 —— 转场与预测性返回才会生效。
-            onOpenChild = { childUrl -> navController.navigate(RoutePkH5(childUrl)) },
-        )
+            //
+            // ★ 与 [PkH5ChildScreen] 行为保持一致：跳到**结算页**时折掉中间层
+            //   （本次入口容器 + 之外的对局容器），只保留「最底层 + 结算页」，
+            //   这样从结算页返回直接回主页，不会退回 PK / 对局页。
+            onOpenChild = { childUrl ->
+                navController.navigate(RoutePkH5(childUrl))
+                // ★ 与 [PkH5ChildScreen] 行为保持一致：跳到**结算页**时折掉中间层
+                //   （本入口容器 + 之外的对局容器），只保留「最底层 + 结算页」，
+                //   这样从结算页返回直接回主页，不会退回 PK / 对局页。
+                if (isPkResultUrl(childUrl)) {
+                    navController.dropIntermediateLayers(1)
+                }
+            },
+)
     }
 }

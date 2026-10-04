@@ -261,10 +261,12 @@ fun PkH5ChildScreen(
                     if (error == null && !loadedOnce) {
                         loadedOnce = true
                         AppLogger.i("PkH5Child", "加载下级 H5：$url")
-                        // ★★ 2026-10-04：与入口容器一致 —— 等 View 完成布局后再加载，
-                        // 否则 `100vh` / `100%` 的初始包含块会按「0 高视口」算死
-                        // （详见 PkH5Screen 里那段的完整说明）。
-                        v.post { runCatching { v.loadUrl(url) } }
+                        // ★★ 2026-10-04：**必须等 View 完成测量再加载** —— 下级页是在导航转场
+                        // 动画期间创建的，此时尺寸还是 0×0，若立刻 loadUrl，
+                        // Blink 会把 `100vh` / `height:100%` 的初始包含块固化成 0
+                        // → 荣誉榜整片空白（真机实证：honor-roll 页 vh=0、入口页 vh=853）。
+                        // 详见 loadUrlWhenMeasured 的注释。
+                        loadUrlWhenMeasured(v, url, "PkH5Child")
                     }
                 },
                 onRelease = { v -> releaseWebView(v) },

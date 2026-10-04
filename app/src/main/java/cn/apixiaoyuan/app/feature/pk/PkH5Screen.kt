@@ -396,19 +396,15 @@ fun PkH5Screen(
                         loadedTarget = target
                         AppLogger.i("PkH5", "加载内置 pk-node H5：$url")
                         clearHostCookies()
-                        // ★★ 2026-10-04 修正：**推迟到 View 完成一次布局后再加载**。
+                        // ★★ 2026-10-04 修正：**必须等 View 真正测量完成再加载**。
                         //
-                        // 原生 WebView 的已知行为：如果在 View 还没被测量（尺寸 0×0）
-                        // 时就 `loadUrl`，Blink 会用「0 高视口」初始化视图，
-                        // 之后 `100vh` 和 `height:100%` 的初始包含块就一直是 0
-                        // （而 `innerHeight` 是实时读的，所以看起来「视口正常」）。
+                        // 若在 View 尺寸还是 0×0 时（导航转场动画期间）就 loadUrl，
+                        // Blink 会用「0 高视口」初始化视图并把 `100vh` / `height:100%`
+                        // 的初始包含块**固化**成 0 —— 表现为荣誉榜整片空白、弹窗溢出。
                         //
-                        // 真机实测正是这个指纹：innerHeight=853、clientHeight=853，
-                        // 但 `100vh` = 0、`100%` = 0、`100vw` = 394 正常。
-                        //
-                        // `post{}` 会把加载排到当前消息队列之后 —— 此时 View 已完成
-                        // 测量与布局，视口高度是真实值。
-                        v.post { runCatching { v.loadUrl(url) } }
+                        // 真机日志实证：入口容器（转场后加载）vh=853 ✔，
+                        // 下级容器（转场中加载）vh=0 ✘。详见 loadUrlWhenMeasured 的注释。
+                        loadUrlWhenMeasured(v, url, "PkH5")
                     }
                 },
                 onRelease = { v -> releaseWebView(v) },

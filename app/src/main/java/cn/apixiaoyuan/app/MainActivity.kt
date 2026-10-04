@@ -56,15 +56,6 @@ class MainActivity : ComponentActivity() {
         // 语义与「取不到一律放行」的判据见 LaunchManifest 的类注释（那里有完整说明）。
         cn.apixiaoyuan.app.core.launch.LaunchManifest.gate(this)
 
-        // ⚠️ 临时诊断（定位 vh=0 后即删）：App 启动后自动跑一组 WebView 配置对照实验。
-        //
-        // 不弹窗、不可见（alpha=0.01、不接收点击）、不阻塞（延迟 20s 起、逐组错开 8s），
-        // 结果写进日志 —— 进 App 后过约 1 分钟，搜 `VhProbe` 即可。
-        //
-        // 为什么不能在 Application 里跑：它需要一个 Activity 当 View 宿主
-        // （WebView 的视口尺寸要依附真实窗口），所以挂在 MainActivity 上。
-        runCatching { cn.apixiaoyuan.app.core.pk.host.PkHostOrchestrator.vhProbeOnce(this) }
-
         enableEdgeToEdge()
         setContent {
             ReverseOldGuyTheme {

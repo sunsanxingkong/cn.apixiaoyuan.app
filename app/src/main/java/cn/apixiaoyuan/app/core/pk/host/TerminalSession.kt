@@ -195,6 +195,11 @@ class TerminalSession internal constructor(
 
             append("[终端 $id 已启动] $SHELL -i    cwd=${home.absolutePath}")
             append("[提示] Ctrl+C 中断当前命令；内置 node：\$PK_NODE_BIN；工作区：\$PK_NODE_DIR")
+            // ★ 2026-10-04（用户要求）：每个**新终端会话**开头打一个 `sxd` 字符画。
+            //   放在「已启动 / 提示」之后，这样启动信息仍是最先出现的，
+            //   字符画作为「新会话」的视觉分隔（多开终端时一眼能看出哪块是哪次）。
+            SXD_ART.forEach { append(it.padEnd(ART_WIDTH)) }
+            append("")
             Log.i(logTag, "终端已启动 pidAlive=${p.isAlive}")
             true
         }.getOrElse {
@@ -407,6 +412,37 @@ class TerminalSession internal constructor(
 
         /** 系统 shell。toybox 提供的 mksh；`-i` 交互模式才有提示符。 */
         const val SHELL = "/system/bin/sh"
+
+        /**
+         * 新终端会话开头的 **`SXD` 字符画**（★ 2026-10-04，用户要求）。
+         *
+         * > 「把终端每个新界面开头用字符输出一个「sxd」的字符画。」
+         * > 「用 `/ _` 画」　「大写的 D」
+         *
+         * 用 `/` `_` `|` `\` `<` `>` 这套「斜杠体」拼（比 `#` 点阵更像终端 banner），
+         * 5 行高、三个字母各 8 宽 + 1 空格 = **每行 26 字符**。
+         *
+         * ⚠️ 行尾空格是点阵的一部分，**不要被格式化吃掉**；
+         * 打印时统一 `padEnd(ART_WIDTH)` 兜底。
+         *
+         * ```text
+         *   _____  __   __   _____
+         *  / ____| \ \ / /  |  __ \
+         * | (___    \ V /   | |  \ \
+         *  \___ \    > <    | |__/ /
+         * |_____/   /_/\_\   |_____/
+         * ```
+         */
+        val SXD_ART: List<String> = listOf(
+            "  _____  __   __   _____  ",
+            " / ____| \\ \\ / /  |  __ \\ ",
+            "| (___    \\ V /   | |  \\ \\",
+            " \\___ \\    > <    | |__/ /",
+            "|_____/   /_/\\_\\  |_____/ ",
+        )
+
+        /** [SXD_ART] 每行的标准宽度（见上面的说明）。 */
+        const val ART_WIDTH = 26
     }
 }
 

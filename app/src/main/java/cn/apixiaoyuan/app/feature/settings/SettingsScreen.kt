@@ -38,6 +38,7 @@ import cn.apixiaoyuan.app.core.design.component.AppScrollScaffold
 import cn.apixiaoyuan.app.core.design.component.LocalScrollBottomLimit
 import cn.apixiaoyuan.app.core.design.theme.PageTransitionAnimation
 import cn.apixiaoyuan.app.core.design.theme.PageTransitionPrefs
+import cn.apixiaoyuan.app.core.design.glass.GlassBackend
 import cn.apixiaoyuan.app.core.design.theme.ThemePrefs
 import cn.apixiaoyuan.app.core.navigation.RouteOldSimian
 import cn.apixiaoyuan.app.core.settings.AppConfig
@@ -194,6 +195,18 @@ fun SettingsScreen(navController: AppNavController) {
                     SeedHexRow()
                 }
                 // 底栏效果：三态。
+                // ★★ 2026-10-05（用户要求「测试可以开一个临时用来启用 old 渲染的开关」）：
+                // 玻璃渲染后端 —— 让高版本设备也能切到低版本自写管线看效果。
+                // 不持久化（重启回 AUTO），避免用户误以为玻璃坏了。
+                OptionGroup(label = "玻璃渲染后端（调试）") {
+                    GlassBackend.Mode.entries.forEach { m ->
+                        OptionChip(
+                            text = m.displayName,
+                            selected = GlassBackend.mode == m,
+                            onClick = { GlassBackend.mode = m },
+                        )
+                    }
+                }
                 OptionGroup(label = "底栏效果") {
                     ThemePrefs.BottomBarMode.entries.forEach { mode ->
                         OptionChip(

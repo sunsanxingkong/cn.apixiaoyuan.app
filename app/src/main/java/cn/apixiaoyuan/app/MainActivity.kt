@@ -180,7 +180,7 @@ private fun MainPager(
     // 两条路径共享**同一套几何与动画参数**（64dp 高、4dp 内边距、56dp 指示器、弹簧参数），
     // 所以观感一致；区别只在「像素由谁画」。
     Box(Modifier.fillMaxSize()) {
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
+        if (!cn.apixiaoyuan.app.core.design.glass.GlassBackend.useLowPipeline) {
             // ================= 高版本：原样保留（勿动） =================
             val backdrop = rememberLayerBackdrop()
             // 内容层写入 backdrop，供底栏采样做 LiquidGlass 折射。
@@ -202,10 +202,12 @@ private fun MainPager(
                 },
                 backdrop = backdrop,
                 // 底栏三态来自设置页（液态玻璃 / 毛玻璃 / 纯色）。
-                mode = when (ThemePrefs.bottomBarMode) {
-                    ThemePrefs.BottomBarMode.LIQUID_GLASS -> TabBarMode.LiquidGlass
-                    ThemePrefs.BottomBarMode.FROSTED -> TabBarMode.Blur
-                    ThemePrefs.BottomBarMode.SOLID -> TabBarMode.None
+                mode = when {
+                    // 调试开关「强制无玻璃」时，底栏直接用纯色（对照排查用）。
+                    cn.apixiaoyuan.app.core.design.glass.GlassBackend.noGlassAtAll -> TabBarMode.None
+                    ThemePrefs.bottomBarMode == ThemePrefs.BottomBarMode.LIQUID_GLASS -> TabBarMode.LiquidGlass
+                    ThemePrefs.bottomBarMode == ThemePrefs.BottomBarMode.FROSTED -> TabBarMode.Blur
+                    else -> TabBarMode.None
                 },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)

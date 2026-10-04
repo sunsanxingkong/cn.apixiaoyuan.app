@@ -541,6 +541,13 @@ private class LowGlassSurfaceNode(
         val img = processed
         val shapeOutline = shape.createOutline(size, layoutDirection, this)
 
+        // ★★ 关键修复（2026-10-05）：**先画玻璃，再画子内容**。
+        //
+        // 此前这里完全没有 drawContent() → 玻璃层画完就结束了，
+        // 子内容（Tab 的图标 + 文字、以及所有 AndroidView 之外的内容）
+        // **从未被绘制** —— 用户看到的就是「除了那个栏什么都没有」。
+        // 正确顺序与高版本一致：玻璃在后（先画），内容在前（后画）。
+
         if (img != null) {
             // 玻璃层：把处理后的位图铺满元素，按形状裁剪。
             clipPath(clipPathFor(shapeOutline)) {
@@ -574,6 +581,10 @@ private class LowGlassSurfaceNode(
         if (indicatorLayer) {
             drawInnerShadow(pathFor(shapeOutline), progress().fastCoerceIn(0f, 1f))
         }
+
+        // ★ 子内容最后画（图标 / 文字在玻璃之上）—— 之前漏掉的这一行
+        //   导致底栏「什么都没有」。
+        drawContent()
     }
 
     private fun pathFor(outline: Outline): androidx.compose.ui.graphics.Path {

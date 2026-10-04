@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import cn.apixiaoyuan.app.core.design.glass.low.LowBlurredTopBar
 import cn.apixiaoyuan.app.core.design.glass.low.lowLayerBackdrop
 import cn.apixiaoyuan.app.core.design.glass.low.rememberLowGlassBackdrop
 import top.yukonga.miuix.kmp.basic.Icon
@@ -60,13 +61,26 @@ internal fun LowAppScaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = surfaceColor,
         topBar = {
-            LowTopBar(title = title, onBack = onBack, surfaceColor = surfaceColor)
+            // ★★ 2026-10-05（用户要求「顶部 scaffold 应该同样一比一复刻」）：
+            // 上一版用的是**实色顶栏**（miuix 在 blur 不可用时的降级路径），
+            // 那不是 1:1。现在换成**真的渐变模糊**：GPU（GLSL ES 2.0）跑
+            // 可分离高斯 + 沿高度衰减的强度，参数与高版本
+            // `progressiveTextureBlur(blurRadius = 10f, gradient = ProgressiveBlur.Top.copy(curve = 2.2f))`
+            // 逐项对应（见 LowBlurredTopBar 的对照表）。
+            LowBlurredTopBar(
+                title = title,
+                onBack = onBack,
+                surfaceColor = surfaceColor,
+                backdrop = backdrop,
+            )
         },
     ) { innerPadding ->
         val barInset = LocalBottomBarInset.current
         val barExtra = if (barInset != Dp.Unspecified) barInset else 0.dp
-        // 低版本没有 BlurOverhang，顶栏 inset 就是 Scaffold 给的原值。
-        val topBarInset = innerPadding.calculateTopPadding().coerceAtLeast(0.dp)
+        // ★ 现在低版本也有渐变模糊层了（与高版本同款），顶栏 Box 多了 28dp 下撑；
+        // Scaffold 的 innerPadding.top 也跟着变大 —— 这里减回去，
+        // 保证「只有模糊多盖一段，内容一点不下移」（与高版本 AppScaffold 同逻辑）。
+        val topBarInset = (innerPadding.calculateTopPadding() - 28.dp).coerceAtLeast(0.dp)
         CompositionLocalProvider(
             LocalScrollBottomLimit provides barExtra,
             LocalTopBarInset provides topBarInset,
@@ -85,31 +99,5 @@ internal fun LowAppScaffold(
                 )
             }
         }
-    }
-}
-
-/** 低版本顶栏：实色（miuix 在 blur 不可用时给出的降级形态），无渐变模糊。 */
-@Composable
-private fun LowTopBar(
-    title: String,
-    onBack: (() -> Unit)?,
-    surfaceColor: Color,
-) {
-    Column(Modifier.fillMaxWidth().statusBarsPadding()) {
-        SmallTopAppBar(
-            title = title,
-            modifier = Modifier.fillMaxWidth(),
-            color = surfaceColor,
-            navigationIcon = {
-                if (onBack != null) {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = AppIcons.Back,
-                            contentDescription = "返回",
-                        )
-                    }
-                }
-            },
-        )
     }
 }

@@ -112,7 +112,7 @@ fun LiquidToggle(
     // 低版本改走自写 CPU 管线（core/design/glass/low/LowLiquidToggle.kt），
     // 参数与下面这段**完全同源**（8dp 模糊 / 5dp-10dp 折射 / Capsule）。
     // 高版本一行未改，继续走下面的 kyant 实现。
-    if (android.os.Build.VERSION.SDK_INT < 33) {
+    if (cn.apixiaoyuan.app.core.design.glass.GlassBackend.useLowPipeline) {
         cn.apixiaoyuan.app.core.design.glass.low.LowLiquidToggle(
             selected = selected,
             onSelect = onSelect,

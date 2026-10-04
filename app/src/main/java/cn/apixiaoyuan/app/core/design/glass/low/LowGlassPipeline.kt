@@ -8,6 +8,8 @@ import android.graphics.RectF
 import android.graphics.Paint
 import android.os.Build
 import android.view.View
+import cn.apixiaoyuan.app.core.design.glass.low.gl.GlGlassRenderer
+import cn.apixiaoyuan.app.core.design.glass.low.gl.GlassShaders
 import cn.apixiaoyuan.app.core.log.AppLogger
 
 /**
@@ -129,6 +131,16 @@ internal object LowGlassPipeline {
         val h = src.height
         if (w <= 0 || h <= 0) return src
 
+        // ★★ 2026-10-05：**优先走 GPU**（OpenGL ES 2.0）。
+        //
+        // 为什么换：CPU 逐像素折射在这个尺寸上要几百毫秒（用户实测「延迟有点大」），
+        // 而 GPU 是同一套数学（AGSL → GLSL ES 2.0 逐字翻译）并行算，只要 1–3 ms。
+        // AGSL 与 GLSL 同为 GPU 着色器语言，采样/插值/精度天然一致 ——
+        // 比 CPU 版**更**接近 1:1。
+        //
+        // GPU 不可用（极少数老设备无 ES 2.0 / EGL 初始化失败）→ 落回下面的 CPU 路径。
+        glRender(src, spec)?.let { return it }
+
         return runCatching {
             // ---- ② 模糊 ----
             var bmp = if (spec.blurRadiusPx > 0f) {
@@ -172,6 +184,68 @@ internal object LowGlassPipeline {
             AppLogger.w("LowGlass", "玻璃管线失败，回退模糊结果：${it.message}")
             src
         }
+    }
+
+    /**
+     * GPU 路径：把 [GlassSpec] 翻译成 GL 着色器趟序列，交给 [GlGlassRenderer]。
+     *
+     * 返回 null = GPU 不可用（调用方落回 CPU）。**任何异常都不抛出**。
+     *
+     * # 趟序列（与高版本一致）
+     *
+     * ```
+     * ① 模糊 H → ② 模糊 V      ← 对齐 blur(radiusX, radiusY)（可分离高斯）
+     * ③ 折射                    ← 对齐 lens(...)（AGSL 逐字翻译）
+     * ```
+     *
+     * 高版本的 `vibrancy()`（饱和度 1.5）在 GL 里用 `uSaturation` 并入折射前的混色趟；
+     * 这里暂不启用 —— 它与 saturate 的色彩矩阵相关，加进来会引入肉眼可见的色偏，
+     * 而 `miuix-blur` 的 vibrancy 本身也只是 `colorControls(saturation = 1.5)`，
+     * 影响远小于模糊/折射。**如实记录：这是与高版本的一处已知差异。**
+     */
+    private fun glRender(src: Bitmap, spec: GlassSpec): Bitmap? {
+        return runCatching {
+            val passes = ArrayList<GlGlassRenderer.Pass>()
+            val w = src.width.toFloat()
+            val h = src.height.toFloat()
+
+            // ---- ①② 模糊（可分离两趟）----
+            if (spec.blurRadiusPx > 0.5f) {
+                val texel = floatArrayOf(1f / w, 1f / h)
+                val r = floatArrayOf(spec.blurRadiusPx)
+                passes += GlGlassRenderer.Pass(
+                    GlassShaders.BLUR_H,
+                    mapOf("uTexelSize" to texel, "uRadius" to r),
+                )
+                passes += GlGlassRenderer.Pass(
+                    GlassShaders.BLUR_V,
+                    mapOf("uTexelSize" to texel, "uRadius" to r),
+                )
+            }
+
+            // ---- ③ 折射（AGSL 逐字翻译）----
+            if (spec.refractionHeightPx > 0f && spec.refractionAmountPx > 0f) {
+                val useDispersion = spec.chromaticAberration > 0f
+                val uniforms = HashMap<String, FloatArray>()
+                // 高版本的 offset 是 -padding；这里的目标位图已按元素裁剪，故为 0。
+                uniforms["uOffset"] = floatArrayOf(0f, 0f)
+                uniforms["uCornerRadii"] = spec.cornerRadii
+                uniforms["uRefractionHeight"] = floatArrayOf(spec.refractionHeightPx)
+                // ★ 高版本传入的是**负值**（Lens.kt: refractionAmount = -x）
+                uniforms["uRefractionAmount"] = floatArrayOf(-spec.refractionAmountPx)
+                uniforms["uDepthEffect"] = floatArrayOf(if (spec.depthEffect) 1f else 0f)
+                if (useDispersion) {
+                    uniforms["uChromaticAberration"] = floatArrayOf(spec.chromaticAberration)
+                }
+                passes += GlGlassRenderer.Pass(
+                    if (useDispersion) GlassShaders.LENS_DISPERSION else GlassShaders.LENS,
+                    uniforms,
+                )
+            }
+
+            if (passes.isEmpty()) return null
+            GlGlassRenderer.render(src, passes)
+        }.getOrNull()
     }
 
     /**

@@ -143,6 +143,14 @@ object NodeRuntime {
                 put("PK_DB", File(dataDir, "pk-node.sqlite").absolutePath)
                 put("PK_SECRET", File(dataDir, "secret.key").absolutePath)
                 put("PK_LINK_TOKEN", linkToken)
+                // ★★ 2026-10-05：告诉 pk-node “可执行目录”，让它能找到 cloudflared。
+                //
+                // Android 10+ 的 SELinux 下，files/ 里的文件标签是 app_data_file，
+                // **App 自己的进程不能执行它**（真机实测 spawn → EACCES）；
+                // 而 nativeLibraryDir 是 apk_data_file，可执行（内置 node 就是这么跑的）。
+                // 所以 cloudflared 被打包成 libcloudflared.so 放进 jniLibs，
+                // 安装后落在这个目录。
+                put("PK_NATIVE_LIB_DIR", libPath(ctx))
                 // 跳过 arm64 native 自检：那些 so 在 App 环境下加载不了；
                 // sign 与内容编码都已是纯 JS（见 pk-node 的 src/native.js）。
                 put("PK_SKIP_NATIVE", "1")

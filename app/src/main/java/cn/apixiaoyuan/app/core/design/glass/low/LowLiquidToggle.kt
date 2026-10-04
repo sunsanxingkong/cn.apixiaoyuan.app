@@ -333,6 +333,9 @@ private class LowThumbGlassNode(
         drawAmbientHighlight(path, p)
         // 内阴影（对应 InnerShadow(4dp * p)）。
         drawInnerGlow(path, p)
+
+        // ★ 子内容最后画（与 Tab 栏同一个漏点：没有它则内容全不显示）。
+        drawContent()
     }
 
     /** 顶部柔光条 —— 对应 kyant `Highlight.Ambient`（顶缘一道窄白光）。 */

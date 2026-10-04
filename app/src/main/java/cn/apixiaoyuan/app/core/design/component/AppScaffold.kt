@@ -138,7 +138,7 @@ fun AppScaffold(
     //   所以换成**对应的低版本实现**：顶栏改用 miuix 官方在 blur 不可用时的
     //   降级路径（实色顶栏，那个分支本来就在 BlurredTopBar 里），
     //   内容层的 backdrop 录制改走 Compose 自带 GraphicsLayer（lowLayerBackdrop）。
-    if (android.os.Build.VERSION.SDK_INT < 33) {
+    if (cn.apixiaoyuan.app.core.design.glass.GlassBackend.useLowPipeline) {
         LowAppScaffold(
             title = title,
             onBack = onBack,

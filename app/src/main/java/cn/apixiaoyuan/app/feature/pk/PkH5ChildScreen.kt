@@ -181,11 +181,19 @@ fun PkH5ChildScreen(
                     onFinish = { navController.popBackStack() },
                     onOpenChild = openChildInNewContainer,
                     exceptUrl = url,
+                    tag = "PkH5Child",
                 )
-
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
                 override fun shouldOverrideUrlLoading(view: WebView?, u: String?): Boolean =
-                    u?.let { handleScheme(it, onFinish = { navController.popBackStack() }, onOpenChild = openChildInNewContainer, exceptUrl = url) } ?: false
+                    u?.let {
+                        handleScheme(
+                            it,
+                            onFinish = { navController.popBackStack() },
+                            onOpenChild = openChildInNewContainer,
+                            exceptUrl = url,
+                            tag = "PkH5Child",
+                        )
+                    } ?: false
             }
 
             webChromeClient = object : WebChromeClient() {

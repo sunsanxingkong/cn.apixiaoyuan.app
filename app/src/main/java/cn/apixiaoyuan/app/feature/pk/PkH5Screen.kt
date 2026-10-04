@@ -12,6 +12,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -240,10 +242,13 @@ fun PkH5Screen(
                     onFinish,
                     onOpenChild,
                     exceptUrl = entryUrl,
+                    tag = "PkH5",
                 )
                 @Deprecated("Deprecated in API 24, but kept for older WebView")
                 override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
-                    url?.let { handleScheme(it, onFinish, onOpenChild, exceptUrl = entryUrl) } ?: false
+                    url?.let {
+                        handleScheme(it, onFinish, onOpenChild, exceptUrl = entryUrl, tag = "PkH5")
+                    } ?: false
             }
 
             webChromeClient = object : WebChromeClient() {
@@ -494,6 +499,10 @@ internal fun releaseWebView(view: WebView) {
  * → 压一个新的 H5 容器 → 转场与预测性返回自然生效。
  *
  * @return true 表示已消费该 URL（WebView 不得自行导航）
+ *
+ * @param tag 日志用的来源标签。**必须区分容器** ——
+ *   此前这里硬编码 `"PkH5"`，于是子容器（下级页）触发的跳转也打成 `PkH5`，
+ *   排查「同一页被重复开容器」时**分不清是入口页还是下级页干的**（踩过）。
  */
 internal fun handleScheme(
     url: String,
@@ -504,13 +513,14 @@ internal fun handleScheme(
      * 否则下级页的 `openWebView(self)` 会无限自跳（每跳一次压一个新容器）。
      */
     exceptUrl: String? = null,
+    tag: String = "PkH5",
 ): Boolean {
     // ★ 2026-10-04：pk-node 的 closeWebView 在 App 里发 `leo://close`
     //   （浏览器 iframe 里它才是 history.back()）。见 pk-h5-proxy.js 的 closeWebView。
     if (url.startsWith("leo://")) {
         val host = Uri.parse(url).host ?: return false
         if (host == "close" || host == "back" || host == "finish") {
-            AppLogger.i("PkH5", "H5 请求返回 → 交给导航：$url")
+            AppLogger.i(tag, "H5 请求返回 → 交给导航：$url")
             onFinish()
             return true
         }
@@ -519,20 +529,61 @@ internal fun handleScheme(
     }
 
     // 自己：放行（同文档 hash 导航 / reload）。
-    if (exceptUrl != null && url == exceptUrl) return false
-
+    //
+    // ★★ 2026-10-04 修：判据从「字符串完全相等」改成**同文档语义**（忽略 hash）。
+    //
+    // # 为什么原来会漏
+    //
+    // H5 里 `location.href` 与 `openWebView` 拿到的 URL 常常**只差一个 hash**
+    // （SPA 的 `#/`、或 h5 自己 `history.replaceState` 加的参数顺序变化）。
+    // 精确比较 `url == exceptUrl` 时，`.../honor-roll.html?a=1` 与
+    // `.../honor-roll.html?a=1#/` 会被判成「不同的页面」→
+    // **宿主给它又开一个新容器** → 页面被叠成两层。
+    //
+    // 真机日志里的铁证（荣誉榜/收到的赞「返回后一片空白」的来源）：
+    // ```
+    // 12:00:03.312 H5 请求新页面 → 开新容器：…/honor-roll.html?fromType=oralPkEntry…
+    // 12:00:08.124 H5 请求新页面 → 开新容器：   （同一个 URL，又压一层）
+    // ```
+    // 叠在上面的那层还没渲染完，返回时看到的就是下面那层空白页。
+    //
+    // 同文档判据：path + query 相同即视为「同一页」，hash 不参与比较
+    // （hash 变化是页内路由，本来就不该开新容器；WebView 也确实不会为纯 hash
+    //  变化回调这里，此处只是把边界收紧）。
+    if (exceptUrl != null && sameDocument(url, exceptUrl)) return false
     // ★ 「新的 H5 页面」→ 由 App 导航开新容器（原生转场 + 预测性返回）。
     //   判据：本机同源下的**另一个文档**（PK H5 页面都在 /pk-h5 或 /pk-h5-cdn）。
     //   同文档的 hash 路由（`#/xxx`）不算「新页面」，不能拦 —— 拦了会把 SPA 换页也变成新容器。
     if (url.contains("/pk-h5/") || url.contains("/pk-h5-cdn/")) {
-        // 排除「同一个 URL 只差 hash」的情况（WebView 在纯 hash 变化时通常不会
-        // 触发本回调，这里再兜一层，避免误把 SPA 换页当新页面）。
-        AppLogger.i("PkH5", "H5 请求新页面 → 开新容器：$url")
+        AppLogger.i(
+            tag,
+            "H5 请求新页面 → 开新容器：$url" +
+                (if (exceptUrl != null) "    （本容器=$exceptUrl）" else ""),
+        )
         onOpenChild(url)
         return true
     }
-
     return false
+}
+
+/**
+ * 两个 URL 是不是**同一个文档**（同 origin + 同 path + 同 query，忽略 hash）。
+ *
+ * 不会解析 URL 的兜底路径：退化成正则去掉 hash 后比较（宁可保守判「不同」，
+ * 也不能把正常跳转误吞）。
+ */
+private fun sameDocument(a: String, b: String): Boolean {
+    return runCatching {
+        val ua = a.toHttpUrlOrNull() ?: return@runCatching a.substringBefore('#') == b.substringBefore('#')
+        val ub = b.toHttpUrlOrNull() ?: return@runCatching a.substringBefore('#') == b.substringBefore('#')
+        ua.scheme == ub.scheme &&
+            ua.host == ub.host &&
+            ua.port == ub.port &&
+            ua.encodedPath == ub.encodedPath &&
+            ua.encodedQuery == ub.encodedQuery
+    }.getOrElse {
+        a.substringBefore('#') == b.substringBefore('#')
+    }
 }
 
 /**

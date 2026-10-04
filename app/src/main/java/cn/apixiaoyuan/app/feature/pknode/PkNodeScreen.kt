@@ -198,6 +198,9 @@ fun PkNodeScreen(navController: AppNavController) {
     // 底色：探测到就紧跟网页；没探到则退回主题色（不猜）。
     val bg = pageColor.value ?: MiuixTheme.colorScheme.surfaceContainer
 
+    // ★ 顶部下移一条状态栏（系统真实高度，带资源兜底 + 日志可验证）。
+    val topInset = cn.apixiaoyuan.app.core.design.component.statusBarTopDp()
+
     // 状态栏图标跟着底色走（底色深 → 浅色图标）。
     val view = LocalView.current
     LaunchedEffect(bg) {
@@ -234,7 +237,13 @@ fun PkNodeScreen(navController: AppNavController) {
         Box(modifier = Modifier.weight(1f)) {
             AndroidView(
                 factory = { webView },
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    // ★ 2026-10-04：顶部**下移一条状态栏**（系统真实高度，带资源兜底）。
+                    //   顶上露出的就是根 Column 的 `background(bg)` = **纯色填充**，
+                    //   网页自己的抬头不再被手机状态栏挡住。
+                    //   （此前这里完全没有 top padding，WebView 从 y=0 开始画。）
+                    .padding(top = topInset),
                 update = { view ->
                     if (!ready) return@AndroidView
                     val target = baseUrl to reloadToken

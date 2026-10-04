@@ -2,6 +2,8 @@ package cn.apixiaoyuan.app.core.design.component
 
 import android.graphics.Color as AndroidColor
 import android.webkit.WebView
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -9,7 +11,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import cn.apixiaoyuan.app.core.log.AppLogger
 import org.json.JSONObject
 
@@ -208,4 +212,49 @@ internal fun parseCssColor(s: String): Color? {
 internal fun isDarkColor(c: Color): Boolean {
     val lum = 0.2126f * c.red + 0.7152f * c.green + 0.0722f * c.blue
     return lum < 0.5f
+}
+
+/**
+ * **系统状态栏的高度**（dp），给「H5 容器顶部下移」用（★ 2026-10-04）。
+ *
+ * # 为什么单独抽一个函数（血泪教训）
+ *
+ * 用户三次指出「顶部没有下移」，我三次改错：
+ *  1. 用 `LocalTopBarInset` —— 那是 `AppScaffold` 下发的**顶栏**高度，
+ *     而 H5 容器页是 NavHost 里的全屏二级页，**不在 AppScaffold 内**，它恒为 `0.dp`；
+ *  2. 换成 `WindowInsets.statusBars.getTop()` 后**没有验证它到底算出多少**，
+ *     结果用户仍然看不到下移（本项目全项目没有任何一处这样取 inset，说明
+ *     它在这个语境下很可能为 0）。
+ *
+ * 所以这个函数做三件事，保证**一定能拿到非零值**：
+ *  - 先试 Compose 的 `WindowInsets.statusBars`；
+ *  - 为 0 就回落到 **Android 资源** `status_bar_height`（这个永远是准的）；
+ *  - 仍为 0 就用 24dp 兜底。
+ *
+ * 并且**打日志** —— 让「它到底是多少」可以被验证，而不是靠猜。
+ */
+@Composable
+fun statusBarTopDp(): androidx.compose.ui.unit.Dp {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val context = LocalContext.current
+
+    val fromInsets = with(density) {
+        WindowInsets.statusBars.getTop(this).toDp()
+    }
+
+    val resolved = if (fromInsets.value > 0.5f) {
+        fromInsets
+    } else {
+        // 回落：读系统资源（bar 高度）。
+        val resId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        val px = if (resId > 0) context.resources.getDimensionPixelSize(resId) else 0
+        val dp = with(density) { px.toDp() }
+        if (dp.value > 0.5f) dp else 24.dp
+    }
+
+    AppLogger.d(
+        "H5Inset",
+        "statusBarTop: insets=$fromInsets → 用=$resolved（density=${density.density}）",
+    )
+    return resolved
 }

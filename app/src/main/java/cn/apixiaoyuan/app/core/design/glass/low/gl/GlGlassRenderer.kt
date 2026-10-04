@@ -140,8 +140,17 @@ internal object GlGlassRenderer {
         if (!ensureBuffers(w, h)) return src
 
         // ---- ① 上传源位图到纹理 A ----
+        //
+        // ★★ 2026-10-05 真机报错修正：`GLUtils.texImage2D` 只接受
+        // **ARGB_8888 / RGB_565**，而我们的快照经过 `Bitmap.createScaledBitmap`
+        // 后可能变成 `RGBA_F16` / `HARDWARE` 等格式 →
+        // `IllegalArgumentException: invalid Bitmap format`。
+        // 这里强制转一次（copy 到 ARGB_8888）再上传。
+        val upload = if (src.config == Bitmap.Config.ARGB_8888) src
+        else src.copy(Bitmap.Config.ARGB_8888, false)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texA)
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, src, 0)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, upload, 0)
+        if (upload !== src) upload.recycle()
 
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)

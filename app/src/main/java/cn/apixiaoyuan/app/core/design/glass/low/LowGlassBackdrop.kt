@@ -88,7 +88,7 @@ internal class LowGlassBackdrop {
     var captureIntervalMs: Long = 96L
 
     /** 降采样因子（≥1）。抓到的全尺寸位图会缩到 `1/downscale` 再交给管线。 */
-    var downscale: Int = 3
+    var downscale: Int = 2
 
     private var lastCaptureAt = 0L
     private var capturing = false
@@ -114,9 +114,13 @@ internal class LowGlassBackdrop {
             val bw = max(1, full.width / ds)
             val bh = max(1, full.height / ds)
             val scaled = if (bw != full.width || bh != full.height) {
+                // ★ createScaledBitmap 会继承源格式；而 GPU 上传（GLUtils.texImage2D）
+                //   只接受 ARGB_8888 / RGB_565。所以这里直接产出 ARGB_8888，
+                //   免得后面还要再 copy 一次。
                 Bitmap.createScaledBitmap(full, bw, bh, true)
+                    .let { if (it.config == Bitmap.Config.ARGB_8888) it else it.copy(Bitmap.Config.ARGB_8888, false) }
             } else {
-                full
+                if (full.config == Bitmap.Config.ARGB_8888) full else full.copy(Bitmap.Config.ARGB_8888, false)
             }
             snapshot = scaled
             snapshotId++

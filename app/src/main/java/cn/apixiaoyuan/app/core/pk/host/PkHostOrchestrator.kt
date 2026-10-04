@@ -529,16 +529,157 @@ object PkHostOrchestrator {
      * 这是与 pk-node 分工一致的做法：宿主占满视口 + 告知状态栏高度，
      * 由页面自己排版（详见 h5Url 里 sbh 那段注释）。
      *
-     * 取值：读系统资源 status_bar_height；拿不到就回 0
+     * 取值：读系统资源 status_bar_height，拿不到就回 0
      * —— 让 H5 用它自己的兜底，而不是我们瞎猜一个数（各机型/挖孔屏差异很大）。
      *
-     * 注意：刻意不写死任何机型的具体数值，一切按当前设备的真实资源来。
+     * ★★ 2026-10-04：**必须换算成 CSS px（= dp），不能直接传物理 px**。
+     *
+     * H5 拿到 sbh 后是这么用的（真机页面 HTML 实证）：
+     * ```html
+     * <div class="status-bar" style="height: 152px"></div>
+     * <div class="nav-bar-placeholder" style="height: 202px"></div>   <!-- = 152 + 50 -->
+     * ```
+     * 即它把 sbh **当成 CSS px** 直接写进了行内 style。
+     *
+     * 而 WebView 里 `1 CSS px = 1 dp = density 个物理 px` —— 真机实测：
+     * 屏宽 1280 物理 px、density 3.25 → H5 的 `innerWidth = 394`
+     * （= 1280 / 3.25），即 1 CSS px = 3.25 物理 px。
+     *
+     * 所以直接传物理 px（152）会被 H5 当成 **152 CSS px** 用 → 实际占
+     * 152 × 3.25 ≈ **494 物理 px**，是真实状态栏的 3.25 倍 →
+     * 顶部留白过多（用户报「往下移太多了」）。
+     *
+     * 正确值 = 152 / 3.25 ≈ **47**（CSS px）。
+     *
+     * 注意：刻意不写死任何机型的具体数值，一切按当前设备的真实资源与 density 换算。
      */
+    /**
+     * ⚠️ 临时：app 启动后自动跑一组 WebView 配置对照实验（一次性）。
+     *
+     * # 为什么要有它
+     *
+     * 真机实测到一个矛盾现象：App 的 WebView 里
+     *   · `window.innerHeight` / `documentElement.clientHeight` / `visualViewport.height`
+     *     → 全部 = 853（视口有高度）✔
+     *   · 但 `height:100vh` → **0**、`height:100%` → **0**（`width:100vw` = 394 正常）✘
+     *   → `.honor-roll{height:100vh}` = 0 → 榜单全白、弹窗溢出
+     *
+     * 同一份 HTML 在系统浏览器（同为 Chromium 150）里完全正常。
+     * 已知差异里最可疑的是 **`loadWithOverviewMode = true`** 与
+     * **`meta viewport` 里的 `height=device-height`** 的组合。
+     *
+     * 但改一次配置要重装一次 APK、手动进一次页面 —— 太慢。
+     * 所以这里**一次装包、启动即自测**：用 4 组配置各加载一次本地测试页，
+     * 把 `vh / % / clientHeight / meta` 全部打进日志。
+     *
+     * # 读法
+     *
+     * ```sh
+     * adb shell grep -a 'VhProbe' /data/data/cn.apixiaoyuan.app/files/logs/run-*.log
+     * ```
+     * 看哪一组的 `vh` 变成非 0 —— 那组配置就是正解。
+     *
+     * # 移除
+     *
+     * 定位完成后**整段删掉**（连同 [vhProbeOnce] 的调用）。
+     */
+    fun vhProbeOnce(activity: android.app.Activity) {
+        // 4 组 = 「设置」×「加载时机」两个假设的对照：
+        //
+        //   假设① 设置：`loadWithOverviewMode` 与 meta 的 `height=device-height`
+        //          组合后让 vh 解析成 0（vw 正常、只有 vh/% 塌）。
+        //   假设② 时机：`loadUrl` 发生在 WebView **还没被测量**（尺寸 0×0）时，
+        //          Blink 用「0 高视口」初始化视图，`vh` 与初始包含块就算死了 ——
+        //          而 `innerHeight` 是实时读的所以正常。这能解释「同一份 HTML
+        //          在浏览器里好、在 App 里坏」，因为容器里是「先建后量」。
+        //
+        // 每组都会打出 vw100 / inner / clientH / vh / pct / meta，
+        // 哪一组 `vh` 非 0 就是正解。
+        val combos = listOf(
+            Triple("A_wide1_ovr1_now", true to true, 0L),      // 现状
+            Triple("B_wide1_ovr0_now", true to false, 0L),     // 只关 overview
+            Triple("C_wide1_ovr1_late", true to true, 2500L),  // 只改时机
+            Triple("D_wide1_ovr0_late", true to false, 2500L), // 两个都改
+        )
+        combos.forEachIndexed { idx, c ->
+            val name = c.first
+            val wide = c.second.first
+            val overview = c.second.second
+            val settleMs = c.third
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                runCatching {
+                    val root = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
+                        ?: return@runCatching
+                    val wv = android.webkit.WebView(activity)
+                    wv.settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        useWideViewPort = wide
+                        loadWithOverviewMode = overview
+                    }
+                    val holder = android.widget.FrameLayout(activity)
+                    holder.isClickable = false
+                    holder.isFocusable = false
+                    holder.alpha = 0.01f
+                    holder.addView(
+                        wv,
+                        android.widget.FrameLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                    val url = "http://127.0.0.1:8792/pk-h5/pk.html" +
+                        "?leoAccountId=1&__pkInApp=1&sbh=47&vhprobe=" + idx
+                    wv.webViewClient = object : android.webkit.WebViewClient() {
+                        override fun onPageFinished(v: android.webkit.WebView?, u: String?) {
+                            v?.evaluateJavascript(
+                                "(function(){try{" +
+                                    "var host=document.body||document.documentElement;" +
+                                    "var t=document.createElement('div');" +
+                                    "t.style.cssText='position:absolute;top:-99999px;width:1px;height:100vh';" +
+                                    "host.appendChild(t);var a=Math.round(t.getBoundingClientRect().height);" +
+                                    "t.style.height='100%';var b=Math.round(t.getBoundingClientRect().height);" +
+                                    "host.removeChild(t);" +
+                                    "var m=document.querySelector('meta[name=viewport]');" +
+                                    "return JSON.stringify({vw100:Math.round(document.documentElement.clientWidth)," +
+                                    "inner:window.innerWidth+'x'+window.innerHeight," +
+                                    "clientH:document.documentElement.clientHeight," +
+                                    "vh:a,pct:b,cm:document.compatMode," +
+                                    "meta:m?m.getAttribute('content'):'(none)'});" +
+                                    "}catch(e){return 'ERR:'+e}})()",
+                            ) { res ->
+                                AppLogger.i("VhProbe", "$name wide=$wide overview=$overview settle=${settleMs}ms → $res")
+                                runCatching { root.removeView(holder) }
+                            }
+                        }
+                    }
+                    root.addView(
+                        holder,
+                        android.widget.FrameLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                    // 时机对照：settleMs=0 → 立刻加载（现状做法）；
+                    // settleMs>0 → 先让 View 完成一次测量/布局再加载。
+                    if (settleMs <= 0L) {
+                        wv.loadUrl(url)
+                    } else {
+                        wv.postDelayed({ runCatching { wv.loadUrl(url) } }, settleMs)
+                    }
+                }.onFailure { AppLogger.i("VhProbe", "$name 失败：${it.message}") }
+            }, 20000L + idx * 9000L)
+        }
+    }
+
     private fun immersiveStatusBarPx(): Int {
         val ctx: Context = appCtx ?: return 0
         return runCatching {
             val id = ctx.resources.getIdentifier("status_bar_height", "dimen", "android")
-            if (id > 0) ctx.resources.getDimensionPixelSize(id) else 0
+            if (id <= 0) return@runCatching 0
+            val physPx = ctx.resources.getDimensionPixelSize(id)
+            val density = ctx.resources.displayMetrics.density
+            if (density > 0f) Math.round(physPx / density) else physPx
         }.getOrDefault(0)
     }
 }

@@ -131,7 +131,11 @@ fun PkNodeScreen(navController: AppNavController) {
                 //   不开这两个会让 meta viewport 失效、按物理像素宽排版而溢出。
                 //   自适应行为由 WebView 按设备 density 换算，无固定值。
                 useWideViewPort = true
-                loadWithOverviewMode = true
+                // ★★ 2026-10-04：与入口容器一致 —— `loadWithOverviewMode` 保持 false。
+                // 它会让 WebView 采用 meta viewport 的 `height=device-height`，
+                // 该值被解析成 0 → `100vh` / `100%` 全塌（榜单空白、弹窗溢出）。
+                // 详见 PkH5Screen 里的完整说明。
+                loadWithOverviewMode = false
             }
             // 不需要任何 addJavascriptInterface：管理后台是纯网页，
             // 与 PK H5 的 window 桥无关，宿主插一手只会添乱。

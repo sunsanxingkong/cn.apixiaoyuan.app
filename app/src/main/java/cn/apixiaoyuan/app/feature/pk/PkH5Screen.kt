@@ -189,7 +189,32 @@ fun PkH5Screen(
                 // `loadWithOverviewMode` 是配套项：个别页面若仍有固定像素宽的内容，
                 // 交给 WebView 整体缩放适配，而不是靠宿主写死 scale。
                 useWideViewPort = true
-                loadWithOverviewMode = true
+                // ★★ 2026-10-04 修正：**`loadWithOverviewMode` 必须保持 false**。
+                //
+                // # 症状（真机实测）
+                //
+                // 开着它时，App 的 WebView 里出现一个非常特定的现象：
+                //   · `innerWidth/innerHeight` = 394x853  ✔
+                //   · `documentElement.clientHeight` = 853 ✔
+                //   · `visualViewport` = 394x853            ✔
+                //   但：
+                //   · `height:100vw` → 394  ✔（宽度正常）
+                //   · `height:100vh` → **0** ✘
+                //   · `height:100%`  → **0** ✘
+                //   · `html` 的 computed height → 只有 8px（body 默认 margin）
+                //
+                // 后果：`.honor-roll{height:100vh}` = 0 → 榜单整片空白；
+                //       `.modal-container{height:100vh}` = 0 → 背包弹窗溢出屏幕外。
+                //
+                // 而**同一份 HTML 在系统浏览器（同为 Chromium 150）里完全正常**
+                // —— 因为浏览器忽略 meta viewport 里的 `height=device-height`，
+                // 而 `loadWithOverviewMode=true` 会让 WebView 去**采用**这个高度，
+                // 它被解析成 0 之后 vh 与初始包含块就一起塌了。
+                //
+                // 关掉它之后：`useWideViewPort = true` 仍然生效（宽度照旧按
+                // `device-width` 自适应，这才是修「排行榜溢出屏幕」的那一项），
+                // 而高度不再被 `device-height` 污染 → 与浏览器行为一致。
+                loadWithOverviewMode = false
                 // UA 由 pk-node 自己伪装，宿主不追加（否则出现两段版本号）。
                 AppLogger.i("PkH5", "WebView UA = $userAgentString")
             }
@@ -371,7 +396,19 @@ fun PkH5Screen(
                         loadedTarget = target
                         AppLogger.i("PkH5", "加载内置 pk-node H5：$url")
                         clearHostCookies()
-                        v.loadUrl(url)
+                        // ★★ 2026-10-04 修正：**推迟到 View 完成一次布局后再加载**。
+                        //
+                        // 原生 WebView 的已知行为：如果在 View 还没被测量（尺寸 0×0）
+                        // 时就 `loadUrl`，Blink 会用「0 高视口」初始化视图，
+                        // 之后 `100vh` 和 `height:100%` 的初始包含块就一直是 0
+                        // （而 `innerHeight` 是实时读的，所以看起来「视口正常」）。
+                        //
+                        // 真机实测正是这个指纹：innerHeight=853、clientHeight=853，
+                        // 但 `100vh` = 0、`100%` = 0、`100vw` = 394 正常。
+                        //
+                        // `post{}` 会把加载排到当前消息队列之后 —— 此时 View 已完成
+                        // 测量与布局，视口高度是真实值。
+                        v.post { runCatching { v.loadUrl(url) } }
                     }
                 },
                 onRelease = { v -> releaseWebView(v) },

@@ -140,7 +140,11 @@ fun PkH5ChildScreen(
                 //   页面按**物理像素宽**（而非 device-width）排版 → 排行榜等内容溢出屏幕外。
                 //   自适应说明见 PkH5Screen；此处不设任何固定宽度/缩放。
                 useWideViewPort = true
-                loadWithOverviewMode = true
+                // ★★ 2026-10-04：与入口容器一致 —— `loadWithOverviewMode` 保持 false。
+                // 它会让 WebView 采用 meta viewport 的 `height=device-height`，
+                // 该值被解析成 0 → `100vh` / `100%` 全塌（榜单空白、弹窗溢出）。
+                // 详见 PkH5Screen 里的完整说明。
+                loadWithOverviewMode = false
             }
 
             webViewClient = object : WebViewClient() {
@@ -257,7 +261,10 @@ fun PkH5ChildScreen(
                     if (error == null && !loadedOnce) {
                         loadedOnce = true
                         AppLogger.i("PkH5Child", "加载下级 H5：$url")
-                        v.loadUrl(url)
+                        // ★★ 2026-10-04：与入口容器一致 —— 等 View 完成布局后再加载，
+                        // 否则 `100vh` / `100%` 的初始包含块会按「0 高视口」算死
+                        // （详见 PkH5Screen 里那段的完整说明）。
+                        v.post { runCatching { v.loadUrl(url) } }
                     }
                 },
                 onRelease = { v -> releaseWebView(v) },

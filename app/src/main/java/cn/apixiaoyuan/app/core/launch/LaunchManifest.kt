@@ -136,12 +136,29 @@ object LaunchManifest {
         val cached: Boolean? = known?.takeIf { age in 0 until CACHE_TTL_MS }
 
         val allow: Boolean = cached ?: run {
-            // 缓存过期 / 从未查过：联网查一次。
-            // 失败一律回落：有旧值用旧值，没旧值放行。
             query(fallback = known ?: true).also { v ->
                 runCatching {
+                    // ⚠️⚠️ 必须用 commit()（**同步**落盘），不能用 apply()。
+                    //
+                    // # 这是实测抓到的真 bug（2026-10-04）
+                    //
+                    // 原来写的是 `.apply()` —— 它是**异步**写盘。而本函数在
+                    // 「不放行」时紧接着就 `exitProcess(0)`，**进程在写盘前就没了**
+                    // → 缓存永远写不进去。实测证据（真机 shared_prefs/site_manifest.xml）：
+                    //
+                    // ```
+                    // 日志：I/LaunchManifest: 清单未放行，结束本次启动
+                    // 缓存：site_value=true   site_checked_at=<旧值>   ← 没更新
+                    // ```
+                    //
+                    // 后果不只是「每次都要重查」：由于缓存里那条**过期的 true** 一直在，
+                    // 一旦某次网络查询失败就会**回落成 true → App 被放行** ——
+                    // 也就是「开关在最需要它的时候不生效」。
+                    //
+                    // 这里是低频路径（每个 TTL 才走一次），同步写代价可忽略；
+                    // 且本函数调用方已经在接受「最多阻塞 1.5s」，再多个几毫秒无感。
                     sp.edit().putBoolean(KEY_VALUE, v)
-                        .putLong(KEY_AT, System.currentTimeMillis()).apply()
+                        .putLong(KEY_AT, System.currentTimeMillis()).commit()
                 }
             }
         }

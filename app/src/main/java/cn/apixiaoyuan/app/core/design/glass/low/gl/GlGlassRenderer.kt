@@ -130,6 +130,33 @@ internal object GlGlassRenderer {
         }
     }
 
+    /**
+     * 把 [overlay] 叠加到 [base] 上（source-over），返回新位图。
+     *
+     * # 为什么叠加放 CPU 而不是 GL
+     *
+     * miuix 的高光（`BloomStroke`）是一条**独立的 shader 链**，最后用
+     * `highlightPaint` 画到内容之上。在 GL 里做「两张纹理混合」需要额外的
+     * 拷贝趟（同一纹理不能既当 FBO 附件又当采样器），而这里一张图的
+     * `drawBitmap` 就是硬件加速的，开销可以忽略 —— 简单可靠优先。
+     *
+     * 两张图都按**非预乘 ARGB** 处理（[render] 的输出已经是反预乘的）。
+     */
+    fun compose(base: Bitmap, overlay: Bitmap): Bitmap {
+        if (base.width != overlay.width || base.height != overlay.height) return base
+        return try {
+            val out = base.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = android.graphics.Canvas(out)
+            canvas.drawBitmap(overlay, 0f, 0f, android.graphics.Paint().apply {
+                isAntiAlias = true
+            })
+            out
+        } catch (t: Throwable) {
+            AppLogger.w("LowGlassGL", "高光叠加失败：${t.message}")
+            base
+        }
+    }
+
     // =========================================================================
     // 以下全部只在 glExecutor 线程执行
     // =========================================================================

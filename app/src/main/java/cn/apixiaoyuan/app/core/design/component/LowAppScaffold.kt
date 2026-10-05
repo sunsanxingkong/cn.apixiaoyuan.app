@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import cn.apixiaoyuan.app.core.design.glass.low.LowBlurredTopBar
+import cn.apixiaoyuan.app.core.design.glass.low.TOP_BAR_BLUR_OVERHANG
 import cn.apixiaoyuan.app.core.design.glass.low.lowLayerBackdrop
 import cn.apixiaoyuan.app.core.design.glass.low.rememberLowGlassBackdrop
 import top.yukonga.miuix.kmp.basic.Icon
@@ -100,10 +101,16 @@ internal fun LowAppScaffold(
     ) { innerPadding ->
         val barInset = LocalBottomBarInset.current
         val barExtra = if (barInset != Dp.Unspecified) barInset else 0.dp
-        // ★ 现在低版本也有渐变模糊层了（与高版本同款），顶栏 Box 多了 28dp 下撑；
+        // ★ 现在低版本也有渐变模糊层了（与高版本同款），顶栏 Box 多了下撑段
+        // （长度 = [LowBlurredTopBar] 的 overhang，与高版本 BlurOverhang 同值）；
         // Scaffold 的 innerPadding.top 也跟着变大 —— 这里减回去，
         // 保证「只有模糊多盖一段，内容一点不下移」（与高版本 AppScaffold 同逻辑）。
-        val topBarInset = (innerPadding.calculateTopPadding() - 28.dp).coerceAtLeast(0.dp)
+        //
+        // ★ 2026-10-05 修正：此前这里写死 28.dp，与 LowBlurredTopBar 的常量重复 ——
+        //   改成引用同一个常量，避免将来改一处漏一处（这正是「高版本公式照抄」
+        //   的反面教材：同一个数值必须只有一个来源）。
+        val topBarInset = (innerPadding.calculateTopPadding() - TOP_BAR_BLUR_OVERHANG)
+            .coerceAtLeast(0.dp)
         CompositionLocalProvider(
             LocalScrollBottomLimit provides barExtra,
             LocalTopBarInset provides topBarInset,

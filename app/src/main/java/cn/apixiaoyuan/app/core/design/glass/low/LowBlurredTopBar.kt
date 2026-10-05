@@ -40,7 +40,7 @@ import cn.apixiaoyuan.app.core.design.component.LocalScrollBottomLimit
 import cn.apixiaoyuan.app.core.design.component.LocalTopBarInset
 import cn.apixiaoyuan.app.core.design.icon.AppIcons
 import cn.apixiaoyuan.app.core.design.glass.low.gl.GlGlassRenderer
-import cn.apixiaoyuan.app.core.design.glass.low.gl.GlassShaders
+import cn.apixiaoyuan.app.core.design.glass.low.gl.MiuixShaderPorts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -49,6 +49,23 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+
+/**
+ * 顶栏模糊层的**下撑高度** —— 与高版本 `AppScaffold.BlurOverhang` **同一个值**。
+ *
+ * # 为什么要有下撑
+ *
+ * 模糊层如果只覆盖顶栏本体，内容滚到顶栏下缘时会**戛然而止** —— 出现一条硬边。
+ * 多盖一段并让模糊强度在这段里衰减到 0，视觉上就变成「自然的渐隐」。
+ *
+ * # 为什么必须共用常量（2026-10-05 修正）
+ *
+ * `AppScaffold` 要把这段高度从 `innerPadding.top` 里减掉（保证「只有模糊多盖
+ * 一段，内容一点不下移」），低版本 [cn.apixiaoyuan.app.core.design.component.LowAppScaffold]
+ * 也要减。此前两处**各自写死 28.dp** —— 改一处漏一处就是必然。
+ * 现在统一引用本常量，且与高版本 `AppScaffold` 的 `BlurOverhang` 保持同值。
+ */
+internal val TOP_BAR_BLUR_OVERHANG: Dp = 28.dp
 
 /**
  * 低版本顶栏**渐变模糊** —— miuix-blur `progressiveTextureBlur` 的 1:1 等价实现。
@@ -224,7 +241,7 @@ private class LowProgressiveBlurNode(
         }
     }
 
-    /** 裁出「顶栏 + overhang」那块，跑 GPU 渐变模糊 + 混色。 */
+    /** 裁出「顶栏 + overhang」那块，跑 miuix 真实渐进模糊 + 混色。 */
     private fun renderProgressive(snapshot: Bitmap, bounds: Rect, ds: Int): Bitmap? {
         val d = ds.coerceAtLeast(1)
         val sw = snapshot.width
@@ -241,32 +258,75 @@ private class LowProgressiveBlurNode(
         val fw = w.toFloat()
         val fh = h.toFloat()
 
+        // ★★ 2026-10-05 重写：改用 **miuix 的真实算法**（见 MiuixShaderPorts）。
+        //
+        // 旧的实现是我自己编的「半径随高度衰减」—— 那不是 miuix 的做法。
+        // miuix 的渐进模糊（`buildProgressiveStackShader`）是：
+        //   ① 对整层做**全强度模糊**；
+        //   ② 用遮罩 shader 生成一条**软过渡权重** w(xy)；
+        //   ③ 合成 `mix(sharp, blurred, w)`。
+        // 所以渐变体现在**遮罩**上，模糊半径是恒定的 —— 这是关键区别。
+        //
+        // 参数对应（高版本 AppScaffold.BlurredTopBar）：
+        //   blurRadius = 10f, gradient = ProgressiveBlur.Top.copy(curve = 2.2f)
+        //   blendColors = [surface α 0.30]
         val passes = ArrayList<GlGlassRenderer.Pass>()
-        val texel = floatArrayOf(1f / fw, 1f / fh)
-        // 半径/曲线在降采样图上按同一比例缩放（与 Lens.kt 的 /sf 同口径）。
-        val radius = floatArrayOf(blurRadiusPx / d)
-        val curveArr = floatArrayOf(curve)
-        val heightArr = floatArrayOf(fh)
 
+        // 顶点：预乘（整条链路的起点，见 LowGlassPipeline.glRender 的说明）。
+        passes += GlGlassRenderer.Pass(MiuixShaderPorts.PREMUL)
+
+        val blurPx = (blurRadiusPx / d).coerceAtLeast(0.5f)
+        val step = floatArrayOf(1f / fw, 1f / fh)
         passes += GlGlassRenderer.Pass(
-            GlassShaders.PROGRESSIVE_H,
-            mapOf("uTexelSize" to texel, "uRadius" to radius, "uCurve" to curveArr, "uHeight" to heightArr),
-        )
-        passes += GlGlassRenderer.Pass(
-            GlassShaders.PROGRESSIVE_V,
-            mapOf("uTexelSize" to texel, "uRadius" to radius, "uCurve" to curveArr, "uHeight" to heightArr),
-        )
-        // 混色（对应高版本 blendColors = [surface α0.30]，避免深色内容把顶栏压灰）。
-        passes += GlGlassRenderer.Pass(
-            GlassShaders.BLEND,
+            MiuixShaderPorts.BLUR_H,
             mapOf(
-                "uBlendColor" to floatArrayOf(
-                    blendColor.red, blendColor.green, blendColor.blue, blendAlpha,
-                ),
+                "uStep" to step,
+                "uRadius" to floatArrayOf(blurPx),
+                "uNoise" to floatArrayOf(0.75f),
+            ),
+        )
+        passes += GlGlassRenderer.Pass(
+            MiuixShaderPorts.BLUR_V,
+            mapOf(
+                "uStep" to step,
+                "uRadius" to floatArrayOf(blurPx),
+                "uNoise" to floatArrayOf(0.75f),
             ),
         )
 
-        return runCatching { GlGlassRenderer.render(cropped, passes) }.getOrNull()
+        // 遮罩：沿 Y 轴从「贴顶=1」过渡到「底部=0」。
+        //   uGradAxis = (0,1)，则 p = xy.y（距顶的像素距离）。
+        //   band = (0, 高度)，curve 照抄高版本 2.2。
+        //   level=1 / slope=1 → w = clamp(1 - raw, 0, 1)，即贴顶全模糊、底部全清晰。
+        passes += GlGlassRenderer.Pass(
+            MiuixShaderPorts.PROGRESSIVE_MASK,
+            mapOf(
+                "uGradAxis" to floatArrayOf(0f, 1f),
+                "uGradBand" to floatArrayOf(0f, fh),
+                "uCurve" to floatArrayOf(curve),
+                "uLevel" to floatArrayOf(1f),
+                "uSlope" to floatArrayOf(1f),
+            ),
+        )
+
+        // ★ 这里**不能**接 UNPREMUL —— 它会把 alpha 强制成 1，遮罩权重就丢了。
+        //   PROGRESSIVE_MASK 已经输出「非预乘色 + mask 覆盖率」，直接可用。
+        //   （这也是我上一版写错的地方：先 mask 再 unpremul，等于渐变白做。）
+
+        val blurred = runCatching { GlGlassRenderer.render(cropped, passes) }.getOrNull() ?: return null
+
+        // 与原始（清晰）内容合成：out = sharp*(1-w) + blur*w。
+        // 用 CPU 合成（Canvas 混合是硬件加速的，且省一趟 GPU 往返）。
+        return runCatching {
+            val out = cropped.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = android.graphics.Canvas(out)
+            // 原图（清晰）先画，再把「已带遮罩 alpha 的模糊层」叠上去。
+            canvas.drawBitmap(cropped, 0f, 0f, null)
+            canvas.drawBitmap(blurred, 0f, 0f, android.graphics.Paint().apply {
+                alpha = (blendAlpha.coerceIn(0f, 1f) * 255).toInt()
+            })
+            out
+        }.getOrNull()
     }
 
     override fun ContentDrawScope.draw() {

@@ -9,7 +9,7 @@ import android.graphics.Paint
 import android.os.Build
 import android.view.View
 import cn.apixiaoyuan.app.core.design.glass.low.gl.GlGlassRenderer
-import cn.apixiaoyuan.app.core.design.glass.low.gl.GlassShaders
+import cn.apixiaoyuan.app.core.design.glass.low.gl.MiuixShaderPorts
 import cn.apixiaoyuan.app.core.log.AppLogger
 
 /**
@@ -72,6 +72,21 @@ internal object LowGlassPipeline {
          * 1.0 = 不变。默认 1.5 与高版本一致。
          */
         var saturation: Float = 1.5f,
+        /**
+         * 边缘高光强度（`highlight = { BloomStroke(...) }`）—— 0 = 不画。
+         *
+         * ★ 2026-10-05 新增。这是**玻璃「凸起感」的唯一来源**：
+         * miuix 的高光走 SDF 法线场 + 双光源 Lambert（见
+         * [cn.apixiaoyuan.app.core.design.glass.low.gl.MiuixShaderPorts.BLOOM_STROKE]），
+         * 与「上下渐变描边」那种二维近似完全是两回事。
+         *
+         * 高版本底栏用 `iosIndicatorSpecular.copy(alpha = 0.75f)` —— 即 0.75。
+         */
+        var highlightAlpha: Float = 0f,
+        /** 高光描边宽度（px）—— 高版本 `Highlight(width = 1.dp)`。 */
+        var highlightStrokeWidthPx: Float = 0f,
+        /** 高光内侧羽化半径（px）—— 高版本 `BloomStroke(innerBlurRadius = 2.dp)`。 */
+        var highlightInnerBlurPx: Float = 0f,
     )
 
     /**
@@ -212,37 +227,77 @@ internal object LowGlassPipeline {
      */
     private fun glRender(src: Bitmap, spec: GlassSpec): Bitmap? {
         return runCatching {
-            val passes = ArrayList<GlGlassRenderer.Pass>()
             val w = src.width.toFloat()
             val h = src.height.toFloat()
+            val passes = ArrayList<GlGlassRenderer.Pass>()
 
-            // ---- ① vibrancy（饱和度）—— **必须在模糊之前** ----
+            // ================================================================
+            // 效果链 —— 与高版本 `LiquidGlassTabBar` 的 `effects { }` **逐项对应**
             //
-            // 高版本的顺序是 `vibrancy() -> blur() -> lens()`（见 LiquidGlassTabBar）。
-            // 用户反馈「离高版本的底栏还差得远」—— 少的就是这一步：
-            // 没有它，玻璃会因为模糊而发灰，而高版本是透亮的。
+            //   高版本：  vibrancy()  →  blur()  →  lens()     （顺序不能反）
+            //   本实现：  PREMUL → COLOR_CONTROLS → BLUR → LENS  → UNPREMUL
+            //
+            // 多出来的 PREMUL / UNPREMUL 是**低版本必须显式做**的一步：
+            // 高版本的 miuix-blur 在内部自动维护预乘语义（见其 `buildPremulShader`），
+            // 而我们直接操作 Bitmap 纹理，必须自己保证。
+            //
+            // ★ 预乘为什么关键（用户「发灰」的真因）：
+            //   非预乘空间里，一个 50% 透明像素的 RGB 仍是它的本色；
+            //   模糊时这些半透明像素和全透明像素一起平均 → 透明区的 (0,0,0) 黑色
+            //   被混进颜色里 → **整体发灰、发暗**。
+            //   预乘后 `rgb*a`，全透明像素自动是 0 且权重也是 0 —— 数学上等价于
+            //   「只对不透明部分做加权平均」，这才是玻璃该有的通透感。
+            // ================================================================
+            passes += GlGlassRenderer.Pass(MiuixShaderPorts.PREMUL)
+
+            // ---- ① vibrancy()：colorControls(brightness=0, contrast=1, saturation=1.5) ----
+            //
+            // 高版本 `liquid/Vibrancy.kt` 就是这三个参数。少了它玻璃会因模糊而发灰；
+            // 而「发灰」正是用户反馈的核心观感问题之一。
             if (spec.saturation != 1.0f) {
                 passes += GlGlassRenderer.Pass(
-                    GlassShaders.VIBRANCY,
-                    mapOf("uSaturation" to floatArrayOf(spec.saturation)),
+                    MiuixShaderPorts.COLOR_CONTROLS,
+                    mapOf(
+                        "uBrightness" to floatArrayOf(0f),
+                        "uContrast" to floatArrayOf(1f),
+                        "uSaturation" to floatArrayOf(spec.saturation),
+                    ),
                 )
             }
 
-            // ---- ②③ 模糊（可分离两趟）----
+            // ---- ② blur()：配对高斯（可分离两趟）----
+            //
+            // 用 miuix 的真实内核（`buildBlurShader`）：
+            //   · σ = radius*0.5 + 0.5（不是 radius/2 —— 有半像素修正）
+            //   · 配对采样 a=2j+1 / b=a+1，重心合并
+            //   · 部分覆盖权重 clamp(radius-a+1, 0, 1)
+            // 这一套与我此前写的「标准高斯」在半径较大时形状明显不同。
             if (spec.blurRadiusPx > 0.5f) {
-                val texel = floatArrayOf(1f / w, 1f / h)
-                val r = floatArrayOf(spec.blurRadiusPx)
+                // miuix 的配对循环上限：半径 r 需要 ceil(r/2)+1 对。
+                // ES 2.0 循环上界是常量 32（= 62px 半径），超出则截断并记录。
+                val rClamped = spec.blurRadiusPx.coerceAtMost(62f)
+                if (rClamped < spec.blurRadiusPx) {
+                    AppLogger.w(
+                        "LowGlass",
+                        "模糊半径 ${spec.blurRadiusPx}px 超过单趟上限，截断到 ${rClamped}px" +
+                            "（如需更大，应加大 downscale 而不是加循环）",
+                    )
+                }
+                val step = floatArrayOf(1f / w, 1f / h)
+                val r = floatArrayOf(rClamped)
+                // 抖动系数：miuix 默认用于打散 8bit 色带。取值 0.75（约半级色阶）。
+                val noise = floatArrayOf(0.75f)
                 passes += GlGlassRenderer.Pass(
-                    GlassShaders.BLUR_H,
-                    mapOf("uTexelSize" to texel, "uRadius" to r),
+                    MiuixShaderPorts.BLUR_H,
+                    mapOf("uStep" to step, "uRadius" to r, "uNoise" to noise),
                 )
                 passes += GlGlassRenderer.Pass(
-                    GlassShaders.BLUR_V,
-                    mapOf("uTexelSize" to texel, "uRadius" to r),
+                    MiuixShaderPorts.BLUR_V,
+                    mapOf("uStep" to step, "uRadius" to r, "uNoise" to noise),
                 )
             }
 
-            // ---- ③ 折射（AGSL 逐字翻译）----
+            // ---- ③ lens()：圆角矩形折射（AGSL 逐字翻译，见 GlassShaders）----
             if (spec.refractionHeightPx > 0f && spec.refractionAmountPx > 0f) {
                 val useDispersion = spec.chromaticAberration > 0f
                 val uniforms = HashMap<String, FloatArray>()
@@ -257,14 +312,85 @@ internal object LowGlassPipeline {
                     uniforms["uChromaticAberration"] = floatArrayOf(spec.chromaticAberration)
                 }
                 passes += GlGlassRenderer.Pass(
-                    if (useDispersion) GlassShaders.LENS_DISPERSION else GlassShaders.LENS,
+                    if (useDispersion) cn.apixiaoyuan.app.core.design.glass.low.gl.GlassShaders.LENS_DISPERSION
+                    else cn.apixiaoyuan.app.core.design.glass.low.gl.GlassShaders.LENS,
                     uniforms,
                 )
             }
 
-            if (passes.isEmpty()) return null
-            GlGlassRenderer.render(src, passes)
+            // ---- ④ 反预乘（回到 Bitmap 能正确显示的表示）----
+            passes += GlGlassRenderer.Pass(MiuixShaderPorts.UNPREMUL)
+
+            if (passes.size <= 2) return null // 只有 PREMUL+UNPREMUL = 没有任何效果
+            var out = GlGlassRenderer.render(src, passes)
+
+            // ---- ⑤ highlight：BloomStroke 边缘高光（**独立一趟后合成**）----
+            //
+            // miuix 里高光是**独立的一条链**（`highlightPaint`），在玻璃之后画。
+            // 它是「玻璃凸起感」的来源 —— 见 [MiuixShaderPorts.BLOOM_STROKE]。
+            if (spec.highlightAlpha > 0f) {
+                bloomHighlight(src, spec, w, h)?.let { hl ->
+                    out = GlGlassRenderer.compose(out, hl)
+                }
+            }
+            out
         }.getOrNull()
+    }
+
+    /**
+     * 边缘高光（miuix `BloomStroke`）—— 单独一趟渲染后叠加。
+     *
+     * 用的是**原始 src 的尺寸**（高光只依赖形状与法线，不依赖内容），
+     * 但会按 [GlassSpec.cornerRadii] 计算出正确的圆角。
+     *
+     * @return 高光图层（alpha 已含在像素里）；失败返回 null（玻璃照常显示，只是没高光）。
+     */
+    private fun bloomHighlight(src: Bitmap, spec: GlassSpec, w: Float, h: Float): Bitmap? {
+        return runCatching {
+            val halfView = floatArrayOf(w / 2f, h / 2f)
+            val halfViewFloor = floatArrayOf(kotlin.math.floor(w / 2f), kotlin.math.floor(h / 2f))
+
+            // 光源方向 —— 与高版本 `LiquidGlassTabBar.iosIndicatorSpecular` 同源：
+            //   primaryLight   = LightPosition(0.5f, -0.3f, -0.05f)  强度 1.0
+            //   secondaryLight = LightPosition(0.5f,  0.8f, -0.5f)   强度 0.4
+            // LightPosition 是**指向光源**的方向向量（z 为负 = 屏幕外），需归一化。
+            val l1 = normalize3(0.5f, -0.3f, -0.05f)
+            val l2 = normalize3(0.5f, 0.8f, -0.5f)
+
+            GlGlassRenderer.render(
+                src,
+                listOf(
+                    GlGlassRenderer.Pass(
+                        MiuixShaderPorts.BLOOM_STROKE,
+                        mapOf(
+                            "uHalfView" to halfView,
+                            "uHalfViewFloor" to halfViewFloor,
+                            "uCornerRadii" to spec.cornerRadii,
+                            "uStrokeWidth" to floatArrayOf(spec.highlightStrokeWidthPx),
+                            "uInnerBlurRadius" to floatArrayOf(spec.highlightInnerBlurPx),
+                            "uInnerBlurRadiusSq" to
+                                floatArrayOf(spec.highlightInnerBlurPx * spec.highlightInnerBlurPx),
+                            "uHighlightAlpha" to floatArrayOf(spec.highlightAlpha),
+                            "uStrokeAlphaMul" to floatArrayOf(1f),
+                            "uLightDir1" to l1,
+                            "uLightColor1" to floatArrayOf(1f, 1f, 1f),
+                            "uLightIntensity1" to floatArrayOf(1f),
+                            "uLightDir2" to l2,
+                            "uLightColor2" to floatArrayOf(1f, 1f, 1f),
+                            "uLightIntensity2" to floatArrayOf(0.4f),
+                            "uStrokeColor" to floatArrayOf(1f, 1f, 1f),
+                        ),
+                    ),
+                ),
+            )
+        }.getOrNull()
+    }
+
+    /** 3 维归一化（避免 kotlin 里手写 math 依赖）。 */
+    private fun normalize3(x: Float, y: Float, z: Float): FloatArray {
+        val len = kotlin.math.sqrt(x * x + y * y + z * z)
+        if (len < 1e-6f) return floatArrayOf(0f, 0f, -1f)
+        return floatArrayOf(x / len, y / len, z / len)
     }
 
     /**
@@ -313,6 +439,10 @@ internal object LowGlassPipeline {
             chromaticAberration = spec.chromaticAberration,
             cornerRadii = FloatArray(4) { spec.cornerRadii[it].coerceAtMost(maxRadius) / ds },
             saturation = spec.saturation,
+            // ★ 高光参数同样按降采样比例缩放（与 Lens.kt 的 `/sf` 同口径）。
+            highlightAlpha = spec.highlightAlpha,
+            highlightStrokeWidthPx = spec.highlightStrokeWidthPx / ds,
+            highlightInnerBlurPx = spec.highlightInnerBlurPx / ds,
         )
         return render(context, cropped, scaled)
     }

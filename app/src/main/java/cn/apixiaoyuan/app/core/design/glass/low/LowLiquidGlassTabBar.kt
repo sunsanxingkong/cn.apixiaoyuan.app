@@ -320,12 +320,20 @@ internal fun LowLiquidGlassTabBar(
     val barCornerPx = with(density) { 32.dp.toPx() }        // CircleShape = 高度一半
     val indicatorCornerPx = with(density) { 28.dp.toPx() }  // 56dp / 2
 
-    // 底栏整体：模糊 + 折射（折射带 24dp，与高版本 lens(24.dp, 24.dp) 同参）
+    // 底栏整体：模糊 + 折射 + 边缘高光（参数与高版本逐项对应）
     val barBarSpec = LowGlassPipeline.GlassSpec(
         blurRadiusPx = blurPx,
         refractionHeightPx = lensHeightPx,
         refractionAmountPx = lensAmountPx,
         cornerRadii = FloatArray(4) { barCornerPx },
+        // ★ 2026-10-05：高光 —— 高版本是
+        //   `highlight = { iosIndicatorSpecular.copy(alpha = 0.75f) }`
+        //   其 Highlight(width = 1.dp) + BloomStroke(innerBlurRadius = 2.dp)
+        //   这就是玻璃「凸起感」的来源（SDF 法线场 + 双光源 Lambert）。
+        //   此前我用「上下渐变描边」近似 —— 那是二维的，没有法线，所以怎么调都不像。
+        highlightAlpha = 0.75f,
+        highlightStrokeWidthPx = with(density) { 1.dp.toPx() },
+        highlightInnerBlurPx = with(density) { 2.dp.toPx() },
     )
 
     Box(
@@ -612,10 +620,10 @@ private class LowGlassSurfaceNode(
             drawPath(pathFor(shapeOutline), Color.Black.copy(alpha = 0.03f * p))
         }
 
-        // 边缘高光（对应高版本 highlight = BloomStroke 双光源）。
-        if (highlight) {
-            drawRimHighlight(pathFor(shapeOutline))
-        }
+        // ★ 2026-10-05：边缘高光**已并入 GPU 管线**（MiuixShaderPorts.BLOOM_STROKE，
+        //  SDF 法线场 + 双光源 Lambert），不再用二维渐变描边近似 ——
+        //  是否画高光由调用方在 [LowGlassPipeline.GlassSpec.highlightAlpha] 里控制
+        //  （传 0 即不画），这里不再单独绘制，否则会出现**双份高光**。
 
         // 指示器的内阴影在**内容之后画**（它是压在玻璃边缘内侧的暗圈）。
         if (indicatorLayer) {
@@ -640,11 +648,22 @@ private class LowGlassSurfaceNode(
     private fun clipPathFor(outline: Outline): androidx.compose.ui.graphics.Path =
         pathFor(outline)
 
-    /** 边缘高光：上亮下暗的双光源渐变描边（对齐 BloomStroke 的观感）。 */
-    private fun DrawScope.drawRimHighlight(
-        path: androidx.compose.ui.graphics.Path,
-    ) {
-        val strokeWidth = 1.dp.toPx() * density / density // 1dp
+    /**
+     * 边缘高光 —— **已废弃的二维近似**。
+     *
+     * 保留函数是为了留个对照（说明为什么二维方法不行）：
+     * miuix 的高光本质是 **3D 法线场**（`getNormal` 在边缘带构造球面隆起），
+     * 光源方向与法线做 Lambert 点积 —— 所以上缘的自然亮、下缘自然暗，
+     * 且**圆角处的亮边会沿弧线弯曲**。
+     *
+     * 而上下渐变描边是「一刀切」的：圆角处也会被拉成水平渐变，
+     * 看起来像贴了一条渐变纸条，没有玻璃的厚度感。
+     *
+     * 现在高光由 [cn.apixiaoyuan.app.core.design.glass.low.gl.MiuixShaderPorts.BLOOM_STROKE]
+     * 在 GPU 上算，本函数不再被调用。
+     */
+    @Suppress("unused")
+    private fun DrawScope.drawRimHighlightDeprecated(path: androidx.compose.ui.graphics.Path) {
         val brush = Brush.verticalGradient(
             0.0f to Color.White.copy(alpha = 0.42f),
             0.35f to Color.White.copy(alpha = 0.12f),
@@ -652,7 +671,7 @@ private class LowGlassSurfaceNode(
             0.85f to Color.White.copy(alpha = 0.10f),
             1.0f to Color.White.copy(alpha = 0.26f),
         )
-        drawPath(path, brush, style = Stroke(width = strokeWidth))
+        drawPath(path, brush, style = Stroke(width = 1.dp.toPx()))
     }
 
     /** 内阴影：按下越深、内侧暗圈越明显（对齐 innerShadow(radius = 8dp * progress)）。 */

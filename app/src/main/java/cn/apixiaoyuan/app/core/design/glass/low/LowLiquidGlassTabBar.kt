@@ -93,7 +93,18 @@ import kotlin.math.abs
 import kotlin.math.sign
 
 /**
- * **低版本液态玻璃悬浮 Tab 栏** —— `LiquidGlassTabBar` 的 API 24–32 等价实现。
+ * **低版本悬浮 Tab 栏** —— `LiquidGlassTabBar` 的**降级实现**（API 24–32）。
+ *
+ * ★★ 2026-10-05（用户：「算了低版本还是做降级处理吧，底栏就用毛玻璃」）：
+ *
+ * 低版本**不再做 1:1 液态玻璃**（折射/高光/按压玻璃那套已放弃），统一降级：
+ *
+ * | 档位 | 渲染 |
+ * |---|---|
+ * | 液态玻璃（LiquidGlass）/ 毛玻璃（Blur） | **毛玻璃**：`blur(25dp)` + 容器色 α0.65（无折射、无高光）|
+ * | 纯色（None） | 容器色实心（不采样、不模糊）|
+ *
+ * 指示器统一为普通半透明块（`indicatorColor α0.15`），与高版本 Blur/None 档同款。
  *
  * # 为什么需要它
  *
@@ -102,31 +113,11 @@ import kotlin.math.sign
  * `RenderEffect`（API 31+）、折射走 AGSL（API 33+）——
  * 在 Android 7（API 24）上那些效果会**整个消失**（源码里是 `return`，不是降级）。
  *
- * 所以本文件把同一条效果链**逐段搬到 CPU 上**：
- *
- * | 高版本（miuix-blur / AGSL） | 低版本（本文件） |
- * |---|---|
- * | `.layerBackdrop(backdrop)` 录纹理 | [LowGlassBackdrop] + `GraphicsLayer.record` |
- * | `blur(4dp)` → `RenderEffect` | [LowBlur] → `RenderScript.ScriptIntrinsicBlur` |
- * | `lens(24dp, 24dp)` → AGSL | [LensKt] → **AGSL 逐行 CPU 翻译** |
- * | `highlight = BloomStroke(...)` | 本文件 [drawRimHighlight] 的渐变描边 |
- * | `innerShadow` → `BlurEffect` | 本文件 [drawInnerShadow] 的软件阴影 |
- * | `dropShadow` | 本文件 `BlurMaskFilter` 阴影 |
- *
- * # 参数与高版本**同源**
+ * # 与高版本仍然同源的部分
  *
  * 几何、动画、颜色、动画曲线全部照抄（64dp 高、4dp 内边距、56dp 指示器、
  * `CircleShape`、`TabItem` 尺寸、`DampedDragAnimation` 的弹簧参数）——
- * 只有「怎么把像素画出来」这一段换了后端。
- *
- * # 性能（如实说明）
- *
- * CPU 渲染有硬上限，本实现用三招控住：
- *  - **降采样**：背景先缩到 `1/3`（[LowGlassBackdrop.downscale]）再处理；
- *  - **只在需要时算**：背景快照版本号 / 按压进度变化才重算，静止时不烧 CPU；
- *  - **小区域**：每块玻璃只处理自己那块矩形（百微米级像素），不是全屏。
- *
- * 已知代价：内容快速滚动时折射**滞后一拍**（最多 [LowGlassBackdrop.captureIntervalMs]）。
+ * 只有「怎么把像素画出来」这一段做了降级（毛玻璃）。
  */
 @Composable
 internal fun LowLiquidGlassTabBar(
@@ -139,25 +130,28 @@ internal fun LowLiquidGlassTabBar(
     indicatorColor: Color = MaterialTheme.colorScheme.primary,
     contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
     activeContentColor: Color = MaterialTheme.colorScheme.primary,
-    liquidGlassBlurRadius: Dp = 4.dp,
+    /** 毛玻璃模糊半径（px 源值）—— 对齐高版本 Blur 档的 `blur(25.dp)`。 */
+    frostedBlurRadius: Dp = 25.dp,
     /**
      * 底栏渲染模式（与高版本 TabBarMode 同语义）。
      *
-     * 2026-10-05（用户要求低版本也能用非液态玻璃的底栏效果）：
-     *  - LiquidGlass：模糊 + 折射
-     *  - Blur：只模糊（更省电、更流畅）
-     *  - None：纯色（不采样背景，低端机保底）
+     * ★★ 2026-10-05（用户：「算了低版本还是做降级处理吧，底栏就用毛玻璃」）：
+     * 低版本不再做 1:1 液态玻璃（折射/高光/按压玻璃那套已放弃），统一降级：
+     *  - [TabBarMode.None]：纯色（完全不采样背景）；
+     *  - 其余（LiquidGlass / Blur）：**一律渲染毛玻璃** —— 对齐高版本 Blur 档的
+     *    `blur(25dp) + containerColor α0.65`（只模糊，无折射、无高光、无按压玻璃）。
      */
     mode: cn.apixiaoyuan.app.core.design.glass.TabBarMode =
         cn.apixiaoyuan.app.core.design.glass.TabBarMode.LiquidGlass,
 ) {
     if (items.isEmpty()) return
 
-    val isLiquidGlassMode = mode == cn.apixiaoyuan.app.core.design.glass.TabBarMode.LiquidGlass
-    val isBlurMode = mode == cn.apixiaoyuan.app.core.design.glass.TabBarMode.Blur
+    /** None 档 = 纯色（不采样、不模糊）。其余全部走毛玻璃（降级）。 */
+    val isSolidMode = mode == cn.apixiaoyuan.app.core.design.glass.TabBarMode.None
 
     val pillShape = remember { CircleShape }
-    val glassTint = containerColor.copy(alpha = 0.4f)
+    // 毛玻璃色调 —— 对齐高版本 Blur 档 `onDrawSurface = drawRect(containerColor α0.65)`。
+    val frostedTint = containerColor.copy(alpha = 0.65f)
 
     val density = LocalDensity.current
     val context = LocalContext.current
@@ -313,49 +307,26 @@ internal fun LowLiquidGlassTabBar(
         )
     }
 
-    // ★★ 2026-10-05（治卡顿 + 保按压跟手）：把「是否正在交互」告诉采样源。
-    //
-    // 采样源的节流有两档：交互中 32ms（≈30fps，按压玻璃要跟手），
-    // 静止 200ms（背景没变，抓了也白抓）。
-    // 这里监听按压进度：一开始按压就切高频，抬起后回到静止档。
-    val pressProgressForCapture by remember {
-        derivedStateOf { dampedDragAnimation.pressProgress > 0.01f }
-    }
-    LaunchedEffect(backdrop, pressProgressForCapture) {
-        backdrop.setActive(pressProgressForCapture)
-    }
-
-    // ---- 玻璃参数（全部分辨率 px，与高版本的 dp 字面量一一对应） ----
-    val blurPx = with(density) { liquidGlassBlurRadius.toPx() }
-    val lensHeightPx = with(density) { 24.dp.toPx() }
-    val lensAmountPx = with(density) { 24.dp.toPx() }
+    // ---- 毛玻璃参数（对齐高版本 Blur 档：`blur(25.dp)` + `containerColor α0.65`） ----
+    val blurPx = with(density) { frostedBlurRadius.toPx() }
     val barCornerPx = with(density) { 32.dp.toPx() }        // CircleShape = 高度一半
-    val indicatorCornerPx = with(density) { 28.dp.toPx() }  // 56dp / 2
 
-    // 底栏整体：模糊 + 折射 + 边缘高光（参数与高版本逐项对应）
+    // 毛玻璃规格：只模糊，**不折射、不高光、不加饱和**（降级口径）。
+    // 对齐高版本 Blur 档的 `effects = { blur(25.dp) }` —— 那条链里没有 vibrancy()。
     val barBarSpec = LowGlassPipeline.GlassSpec(
         blurRadiusPx = blurPx,
-        refractionHeightPx = lensHeightPx,
-        refractionAmountPx = lensAmountPx,
+        refractionHeightPx = 0f,
+        refractionAmountPx = 0f,
         cornerRadii = FloatArray(4) { barCornerPx },
-        // ★ 2026-10-05：高光 —— 高版本是
-        //   `highlight = { iosIndicatorSpecular.copy(alpha = 0.75f) }`
-        //   其 Highlight(width = 1.dp) + BloomStroke(innerBlurRadius = 2.dp)
-        //   这就是玻璃「凸起感」的来源（SDF 法线场 + 双光源 Lambert）。
-        //   此前我用「上下渐变描边」近似 —— 那是二维的，没有法线，所以怎么调都不像。
-        highlightAlpha = 0.75f,
-        highlightStrokeWidthPx = with(density) { 1.dp.toPx() },
-        // ★ 高光色自身的 alpha —— 高版本 `iosIndicatorSpecular` 的
-        //   `BloomStroke(color = Color.White.copy(alpha = 0.12f))`，即 0.12。
-        highlightStrokeAlphaMul = 0.12f,
-        highlightInnerBlurPx = with(density) { 2.dp.toPx() },
+        highlightAlpha = 0f,
+        saturation = 1f,
     )
 
     Box(
         modifier = modifier.width(IntrinsicSize.Min),
         contentAlignment = Alignment.CenterStart,
     ) {
-        // ================= 底栏主体（玻璃） =================
+        // ================= 底栏主体 =================
         CompositionLocalProvider(LocalContentColor provides contentColor) {
             Row(
                 Modifier
@@ -366,14 +337,22 @@ internal fun LowLiquidGlassTabBar(
                     }
                     .graphicsLayer { translationX = panelOffset }
                     .lowDropShadow(pillShape, isDark = true)
-                    .lowGlassSurface(
-                        context = context,
-                        backdrop = backdrop,
-                        spec = { barBarSpec },
-                        shape = pillShape,
-                        tint = glassTint,
-                        highlight = true,
-                        progress = { 1f },
+                    .then(
+                        if (isSolidMode) {
+                            // 纯色档：不采样、不模糊（低端机保底）。
+                            Modifier.background(containerColor, pillShape)
+                        } else {
+                            // 毛玻璃档（降级）：模糊 25dp + 容器色 α0.65 叠加。
+                            Modifier.lowGlassSurface(
+                                context = context,
+                                backdrop = backdrop,
+                                spec = { barBarSpec },
+                                shape = pillShape,
+                                tint = frostedTint,
+                                highlight = false,
+                                progress = { 1f },
+                            )
+                        }
                     )
                     .then(interactiveHighlight.modifier)
                     .then(interactiveHighlight.gestureModifier)
@@ -385,59 +364,24 @@ internal fun LowLiquidGlassTabBar(
             )
         }
 
-        // ================= 选中指示器（深度折射 + 色散） =================
+        // ================= 选中指示器（降级：普通半透明块） =================
         if (tabWidthPx > 0f) {
             val tabWidthDp = with(density) { tabWidthPx.toDp() }
-            // ★★ 2026-10-05（用户：「特效玻璃指的是按压后出现的玻璃」）：
-            // 按压时指示器才出液态玻璃（高版本的 lens 也是随 pressProgress 渐入）；
-            // 毛玻璃 / 纯色模式下用普通半透明块（与高版本 else 分支同）。
-            if (!isLiquidGlassMode) {
-                Box(
-                    modifier = Modifier
-                        .padding(horizontal = 4.dp)
-                        .graphicsLayer {
-                            val progressOffset = dampedDragAnimation.value * tabWidthPx
-                            translationX =
-                                if (isLtr) progressOffset + panelOffset else -progressOffset + panelOffset
-                        }
-                        .clip(CircleShape)
-                        .background(indicatorColor.copy(alpha = 0.15f), CircleShape)
-                        .height(56.dp)
-                        .width(tabWidthDp),
-                )
-            } else {
+            // ★★ 2026-10-05（降级）：指示器不再做深度折射/色散 —— 与高版本
+            //   Blur / None 档同款的普通半透明块（`indicatorColor α0.15`）。
             Box(
-                Modifier
+                modifier = Modifier
                     .padding(horizontal = 4.dp)
                     .graphicsLayer {
                         val progressOffset = dampedDragAnimation.value * tabWidthPx
-                        translationX = if (isLtr) progressOffset + panelOffset else -progressOffset + panelOffset
+                        translationX =
+                            if (isLtr) progressOffset + panelOffset else -progressOffset + panelOffset
                     }
-                    .lowGlassSurface(
-                        context = context,
-                        backdrop = backdrop,
-                        spec = {
-                            val progress = dampedDragAnimation.pressProgress
-                            LowGlassPipeline.GlassSpec(
-                                // 指示器本身不模糊（高版本只挂 lens），保持锐利的镜面感。
-                                blurRadiusPx = 0f,
-                                refractionHeightPx = with(density) { 10.dp.toPx() } * progress,
-                                refractionAmountPx = with(density) { 14.dp.toPx() } * progress,
-                                depthEffect = true,
-                                chromaticAberration = 0.5f,
-                                cornerRadii = FloatArray(4) { indicatorCornerPx },
-                            )
-                        },
-                        shape = pillShape,
-                        tint = Color.Transparent,
-                        highlight = false,
-                        progress = { dampedDragAnimation.pressProgress },
-                        indicatorLayer = true,
-                    )
+                    .clip(CircleShape)
+                    .background(indicatorColor.copy(alpha = 0.15f), CircleShape)
                     .height(56.dp)
                     .width(tabWidthDp),
             )
-            }
         }
     }
 }

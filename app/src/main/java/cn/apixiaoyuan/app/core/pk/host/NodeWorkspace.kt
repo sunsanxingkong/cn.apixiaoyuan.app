@@ -3,7 +3,9 @@ package cn.apixiaoyuan.app.core.pk.host
 import android.content.Context
 import android.util.Log
 import cn.apixiaoyuan.app.core.log.AppLogger
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
 /**
@@ -24,13 +26,14 @@ import java.util.zip.ZipInputStream
  * - `assets/` 里的文件在 APK 内是**压缩态**，只能通过 `AssetManager.open()` 流式读，
  *   拿不到真实路径。而 `server.js` 里全是 `require('./src/xxx')` 的相对路径解析，
  *   以及 `fs.readFileSync(path.join(__dirname, …))` —— 必须有真实文件系统路径。
- * - 解压一次后持久化，之后启动**零拷贝**（靠 [stampFile] 里的版本戳判定是否需要重解）。
+ * - 解压一次后持久化，之后启动**零拷贝**（靠 [stampFile] 里的版本+ZIP 哈希戳判定是否需要重解）。
  *
  * ## 版本戳机制（避免每次升级都白解压）
  *
- * `filesDir/pk-node/.workspace` 里存一份「来自哪个版本的包」。
- * 与 zip 内 `package.json` 的 `version` 比对：一致则跳过，不一致才清空重解。
- * 这样换 pk-node 版本只需改 zip，不必清 App 数据。
+ * `filesDir/pk-node/.workspace` 里存一份「来自哪个版本、哪份 ZIP 的包」。
+ * 与 assets 中 ZIP 的 `package.json` 版本和 SHA-256 比对：都一致则跳过，
+ * 任一变化就清空重解。这样即使 pk-node 在不改版本号的情况下更新，
+ * 已安装 App 也不会继续复用旧工作区。
  *
  * ⚠️ 解压前**不清空 data 目录**（SQLite 与 secret 在那里）——只重写代码文件。
  * 否则用户每升一次级就丢一次设备链池与账号。
@@ -42,7 +45,7 @@ object NodeWorkspace {
     /** APK assets 里的工作区 zip。由 pk-node 的 `tools/export-app-workspace.js` 产出。 */
     private const val ASSET_ZIP = "pk-node-workspace.zip"
 
-    /** 版本戳文件名（存 pk-node 的 version，如 `1.9.0`）。 */
+    /** 版本戳文件名（存 pk-node 的 version 与内置 ZIP 的 SHA-256）。 */
     private const val STAMP_NAME = ".workspace"
 
     /** 工作区目录名（位于 `filesDir` 下）。 */
@@ -59,7 +62,7 @@ object NodeWorkspace {
         val extracted: Boolean,
         /** 解出的文件数。 */
         val fileCount: Int,
-        /** 来自哪个 pk-node 版本。 */
+        /** 来自哪个 pk-node 版本与内置 ZIP 哈希。 */
         val version: String?,
     )
 
@@ -76,40 +79,45 @@ object NodeWorkspace {
         val root = File(ctx.filesDir, DIR_NAME)
         val stamp = File(root, STAMP_NAME)
 
-        val assetVersion = runCatching { readAssetVersion(ctx) }.getOrNull()
+        val assetStamp = runCatching { readAssetStamp(ctx) }.getOrNull()
             ?: return Result(root, false, 0, null).also {
-                Log.e(TAG, "assets/$ASSET_ZIP 读不到版本号 —— 工作区不可能就绪")
+                Log.e(TAG, "assets/$ASSET_ZIP 读不到版本/哈希 —— 工作区不可能就绪")
             }
 
         // 命中的条件：戳存在、版本一致、且 server.js 真的在（防止上次解压到一半被杀）
         if (stamp.isFile &&
-            stamp.readText().trim() == assetVersion &&
+            stamp.readText().trim() == assetStamp &&
             File(root, "server.js").isFile
         ) {
-            Log.i(TAG, "工作区已是最新 v$assetVersion，跳过解压")
-            return Result(root, false, 0, assetVersion)
+            Log.i(TAG, "工作区已是最新 $assetStamp，跳过解压")
+            return Result(root, false, 0, assetStamp)
         }
 
         return runCatching {
-            extract(ctx, root, assetVersion)
+            extract(ctx, root, assetStamp)
         }.getOrElse {
             Log.e(TAG, "解压工作区失败：${it.message}", it)
             AppLogger.e(TAG, "解压内置 node 工作区失败：${it.message}")
-            Result(root, false, 0, assetVersion)
+            Result(root, false, 0, assetStamp)
         }
     }
 
-    /** 从 assets zip 里读出 `package.json` 的 `version`（不解压整个包）。 */
-    private fun readAssetVersion(ctx: Context): String? {
-        ctx.assets.open(ASSET_ZIP).use { input ->
-            ZipInputStream(input.buffered()).use { zip ->
+    /** 读取 assets zip 的版本和内容哈希，避免同版本更新时复用旧工作区。 */
+    private fun readAssetStamp(ctx: Context): String? {
+        val bytes = ctx.assets.open(ASSET_ZIP).use { it.readBytes() }
+        val sha256 = MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        ByteArrayInputStream(bytes).use { raw ->
+            ZipInputStream(raw.buffered()).use { zip ->
                 while (true) {
                     val e = zip.nextEntry ?: break
                     if (e.name == "package.json") {
                         val text = zip.readBytes().toString(Charsets.UTF_8)
                         // 不引 JSON 库：`"version"` 的位置是固定的，正则足够且无依赖。
-                        return Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
+                        val version = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
                             .find(text)?.groupValues?.get(1)
+                        if (version != null) return "$version:$sha256"
                     }
                     zip.closeEntry()
                 }
@@ -132,7 +140,7 @@ object NodeWorkspace {
      * 整个目录里有 `data/`（SQLite + secret）。删了 = 用户升一次级丢一次账号。
      * 所以只删「本次 zip 里会覆盖的那些顶层条目」，`data/` 天然不在其中。
      */
-    private fun extract(ctx: Context, root: File, version: String): Result {
+    private fun extract(ctx: Context, root: File, stamp: String): Result {
         root.mkdirs()
         val rootCanonical = root.canonicalPath
         val dataDir = File(root, DATA_DIR_NAME).apply { mkdirs() }
@@ -183,10 +191,10 @@ object NodeWorkspace {
         }
 
         // 版本戳最后写：中途被杀 → 戳不存在 → 下次重解（幂等，不会半成品上线）。
-        File(root, STAMP_NAME).writeText(version)
+        File(root, STAMP_NAME).writeText(stamp)
 
-        Log.i(TAG, "工作区已解压 v$version：$count 个文件 → ${root.absolutePath}")
-        AppLogger.i(TAG, "内置 node 工作区已解压 v$version（$count 个文件）")
+        Log.i(TAG, "工作区已解压 $stamp：$count 个文件 → ${root.absolutePath}")
+        AppLogger.i(TAG, "内置 node 工作区已解压 $stamp（$count 个文件）")
         // data 目录显式建一下：NodeRuntime 会往这里写 SQLite，不能等 node 自己建
         // （万一权限/路径问题，早点暴露在日志里）。
         dataDir.mkdirs()

@@ -228,7 +228,17 @@ void main() {
     }
 
     float r = uRadius;
-    float inv2s2 = -1.0 / (2.0 * (r * 0.5 + 0.5) * (r * 0.5 + 0.5));
+    // ★★ 2026-10-05（读 miuix 源码后修正 σ 公式）：
+    //
+    // miuix `BlurEffect.kt` 里 `BLUR_RADIUS_TO_SIGMA = 0.45f`：
+    //     `val sigma = radius * BLUR_RADIUS_TO_SIGMA`
+    // 且 `createBlurEffect` 用 **σ²** 作为方差生成高斯核（`computeBlurParamsInto(variance)`）。
+    //
+    // 我此前写 σ = radius*0.5 + 0.5 —— 那是 **progressive 变半径模糊**的公式
+    // （`createProgressiveBlurEffect` 里 `radius = 2·σ − 1` 的反解），
+    // 用在普通 blur 上会让**半径整体偏大、糊过头**。
+    float sigma = r * 0.45;
+    float inv2s2 = -1.0 / (2.0 * sigma * sigma);
     vec2 step = $step;
 
     // 抖动：只与像素坐标有关（不随时间变），用于打散 8bit 色带。
@@ -652,11 +662,20 @@ void main() {
 
     vec3 n = getNormal(fragCoord, sdf, R);
 
-    // ★ 双光源 Lambert —— 玻璃「上亮下暗」的来源。
-    //   与 miuix 一致：亮度按点积的平方加权（高光更集中在正对光源处）。
-    float l1 = dot(n, uLightDir1);
+    // ★★ 2026-10-05（读 miuix 源码后修正）：**dualPeak 公式**
+    //
+    // miuix `BLOOM_STROKE_SHADER_DUAL`（`iosIndicatorSpecular` 用的就是这个，dualPeak=true）：
+    //   ```glsl
+    //   float l1 = dot(n.xy, lightDir1.xy);          // ← 只用 xy，不点 z
+    //   rgb += half(l1 * l1 * lightIntensity1) * lightColor1.rgb;
+    //   ```
+    // single 模式才是 `clamp(dot(n, lightDir) * falloff, 0, 1)`（带 axis 方向衰减）。
+    //
+    // 我此前写成 `dot(n, uLightDir)` —— 把 z 也点进去了，等于给 3D 法线的
+    // 平坦区（z=-1）固定叠了个常亮项，**边缘亮度分布整个错**。
+    float l1 = dot(n.xy, uLightDir1.xy);
     rgb += (l1 * l1 * uLightIntensity1) * uLightColor1;
-    float l2 = dot(n, uLightDir2);
+    float l2 = dot(n.xy, uLightDir2.xy);
     rgb += (l2 * l2 * uLightIntensity2) * uLightColor2;
 
     gl_FragColor = vec4(rgb * uHighlightAlpha, 1.0) * outMask;

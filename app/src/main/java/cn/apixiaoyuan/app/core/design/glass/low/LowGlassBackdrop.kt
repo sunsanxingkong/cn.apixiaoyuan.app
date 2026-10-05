@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.node.DrawModifierNode
 import androidx.compose.ui.node.ModifierNodeElement
 import androidx.compose.ui.node.requireGraphicsContext
@@ -88,13 +89,44 @@ internal class LowGlassBackdrop {
     /**
      * 采样节流间隔（毫秒）。
      *
-     * ★★ 2026-10-05（用户：「没有特效玻璃出现」）：
-     * 原来是 96ms（约 10fps）—— 按压动画只有 ~300ms，
-     * 96ms 只能采到 3 帧，加上进度量化，**按压玻璃几乎看不见**。
-     * 降到 32ms（约 30fps）后跟手感正常；
-     * 因为现在只拓「顶栏+底栏」包围盒（不到 20% 面积），额外开销很小。
+     * ★★ 2026-10-05（用户「渲染依旧卡顿」）：改为**动态节流**。
+     *
+     * 固定 32ms（≈30fps）虽然让按压玻璃跟手，但**静止时也在 30fps 全屏抓图** ——
+     * 那是纯粹的浪费（背景没变，抓到的图一模一样）。
+     *
+     * 现在按「是否需要即时反馈」分档：
+     *  - [activeIntervalMs]（32ms）：有按压 / 拖拽 / 内容滚动等交互时用；
+     *  - [idleIntervalMs]（200ms）：静止时用（人手感知不到 5fps 的背景更新）。
+     *
+     * 交互方通过 [requestImmediateCapture] 或 [setActive] 通知本采样源。
      */
-    var captureIntervalMs: Long = 32L
+    var captureIntervalMs: Long
+        get() = if (active) activeIntervalMs else idleIntervalMs
+        set(value) {
+            idleIntervalMs = value
+            activeIntervalMs = value
+        }
+
+    /** 交互中（按压/拖拽/动画）的间隔。 */
+    var activeIntervalMs: Long = 32L
+
+    /** 静止时的间隔（人手感知不到 5fps 的背景更新）。 */
+    var idleIntervalMs: Long = 200L
+
+    /** 是否处于交互中。 */
+    private var active = false
+
+    /**
+     * 标记进入/退出交互态。
+     *
+     * 由按压 / 拖拽 / 滚动方在开始时调 `setActive(true)`、结束时 `setActive(false)`。
+     * 进入时顺带请求一次立即抓帧（保证按压第一帧就有正确背景）。
+     */
+    fun setActive(value: Boolean) {
+        if (active == value) return
+        active = value
+        if (value) requestImmediateCapture()
+    }
 
     /**
      * 强制下一次采样（按压等交互事件用）。
@@ -103,6 +135,18 @@ internal class LowGlassBackdrop {
      */
     fun requestImmediateCapture() {
         lastCaptureAt = 0L
+    }
+
+    /**
+     * 距离下一次允许抓帧还有多少毫秒（已到时间返回 0）。
+     *
+     * 采样泵用它决定「睡多久」，避免无谓的定时唤醒 ——
+     * 静止时一觉睡到 [idleIntervalMs] 之后，交互时立刻醒来。
+     */
+    fun msUntilNextCapture(): Long {
+        val elapsed = SystemClock.uptimeMillis() - lastCaptureAt
+        val interval = captureIntervalMs
+        return (interval - elapsed).coerceAtLeast(0L)
     }
 
     /**
@@ -121,8 +165,26 @@ internal class LowGlassBackdrop {
     @Suppress("unused")
     private val regionRegistrationKept = Unit
 
-    /** 宿主 View（Activity content view），用于 View.draw(Canvas) 采样。 */
+    /** 宿主 View（Activity content view），仅作**兜底**采样用。 */
     private var hostViewRef: java.lang.ref.WeakReference<android.view.View>? = null
+
+    /**
+     * 内容层在**窗口坐标系**里的原点（px）。
+     *
+     * ★★ 2026-10-05（修「底栏变灰板」）：快照来自**内容层图层**，
+     * 而玻璃元素的 `boundsInWindow()` 是**窗口坐标** —— 两者原点不同，
+     * 裁剪前必须把这部分偏移减掉，否则会采到错位的区域。
+     */
+    var layerOriginX: Int = 0
+        private set
+    var layerOriginY: Int = 0
+        private set
+
+    /** 由 [LowLayerBackdropNode] 上报内容层在窗口中的位置。 */
+    fun setLayerOrigin(x: Int, y: Int) {
+        layerOriginX = x
+        layerOriginY = y
+    }
 
     /** 快照左上角在宿主坐标系里的位置（px）。裁剪时要减去它。 */
     var regionOrigin: Pair<Int, Int> = 0 to 0
@@ -157,46 +219,65 @@ internal class LowGlassBackdrop {
         val now = SystemClock.uptimeMillis()
         if (!force && now - lastCaptureAt < captureIntervalMs) return
         if (capturing) return
-        val l = layer ?: return
         capturing = true
         lastCaptureAt = now
         try {
-            // ★★ 2026-10-05（治卡顿）：按「需要的区域」采样。
+            // ★★★ 2026-10-05（用户「你自己看着是一个东西吗」——修「底栏变灰板」）：
             //
-            // 旧做法：每次 `toImageBitmap()` 抓**整屏**（1280x2772 ≈ 14MB）再缩。
-            //   ① 每帧全屏 GPU 合成 + 全屏内存拷贝（最贵）；② 缩放又一次全屏重采样；
-            //   ③ 而我们真正需要的只有「顶栏 + 底栏」两条窄条（不到 20% 面积）。
+            // **采样源必须是「内容层」，绝不能含玻璃自己**。
             //
-            // 新做法：折射方先登记需要的窗口矩形（[requestRegion]），
-            // 只把它们的包围盒用 `View.draw(Canvas)` 直接画到**已降采样**的位图上
-            // —— 一次就位，没有全屏拷贝、没有全屏缩放。
-            val hostView = hostViewRef?.get()
-            if (hostView != null) {
-                captureByViewDraw(hostView)
+            // 上一版为了省掉 `toImageBitmap()` 的全屏拷贝，改成 `hostView.draw(canvas)`。
+            // 但 `hostView` 是整个 Activity content view，**玻璃（底栏/顶栏）就在里面** ——
+            // 于是每一帧抓到的图里都含着「上一帧画好的玻璃」，
+            // 玻璃再折射它，反复迭代 ⇒ **收敛成一片均匀色块（灰板）**。
+            //
+            // 高版本 miuix 的 `LayerBackdrop` 没有这个问题：它是**挂在内容层节点上**录制的，
+            // 玻璃是它的兄弟节点、不在录制范围内。这就是「采样源」的语义。
+            //
+            // 所以这里改回 **layer 快照**（`toImageBitmap()`）——
+            // 它录的正是 `.lowLayerBackdrop()` 挂的那个内容层，天然不含玻璃。
+            val l = layer
+            if (l != null) {
+                captureByLayer(l)
                 return
             }
-
-            // ── 兜底：没有 hostView 时回到原来的全屏抓取。
-            val image = l.toImageBitmap()
-            val full = image.asAndroidBitmap()
-            if (full.width <= 0 || full.height <= 0) return
-            val ds = downscale.coerceAtLeast(1)
-            val bw = max(1, full.width / ds)
-            val bh = max(1, full.height / ds)
-            val scaled = if (bw != full.width || bh != full.height) {
-                Bitmap.createScaledBitmap(full, bw, bh, true)
-                    .let { if (it.config == Bitmap.Config.ARGB_8888) it else it.copy(Bitmap.Config.ARGB_8888, false) }
-            } else {
-                if (full.config == Bitmap.Config.ARGB_8888) full else full.copy(Bitmap.Config.ARGB_8888, false)
-            }
-            snapshot = scaled
-            regionOrigin = 0 to 0
-            snapshotId++
+            // ── 兜底：连图层都没有（尚未挂载）时，才退回 View 绘制。
+            hostViewRef?.get()?.let { captureByViewDraw(it) }
         } catch (t: Throwable) {
             AppLogger.w("LowGlass", "背景快照失败：${t.message}")
+            // 图层快照失败（极老设备不支持 PixelCopy 等）→ 退回 View 绘制。
+            hostViewRef?.get()?.let {
+                runCatching { captureByViewDraw(it) }
+            }
         } finally {
             capturing = false
         }
+    }
+
+    /**
+     * 从**内容层图层**抓一帧。
+     *
+     * 这是主路径 —— 与 miuix 的 `LayerBackdrop` 语义一致（只含内容，不含玻璃）。
+     * 抓到的图会立刻缩到 `1/downscale`，大图随即释放。
+     */
+    private suspend fun captureByLayer(l: GraphicsLayer) {
+        val image = l.toImageBitmap()
+        val full = image.asAndroidBitmap()
+        if (full.width <= 0 || full.height <= 0) return
+        val ds = downscale.coerceAtLeast(1)
+        val bw = max(1, full.width / ds)
+        val bh = max(1, full.height / ds)
+        val scaled = if (bw != full.width || bh != full.height) {
+            Bitmap.createScaledBitmap(full, bw, bh, true)
+                .let { if (it.config == Bitmap.Config.ARGB_8888) it else it.copy(Bitmap.Config.ARGB_8888, false) }
+        } else {
+            if (full.config == Bitmap.Config.ARGB_8888) full else full.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        snapshot = scaled
+        // ★ 快照原点 = 内容层左上角在**窗口坐标**里的位置。
+        //   玻璃元素的 bounds 是窗口坐标，裁剪时要减掉它（见 LowGlassPipeline.renderForElement）。
+        regionOrigin = layerOriginX to layerOriginY
+        snapshotId++
     }
 
     /**
@@ -274,7 +355,7 @@ private class LowLayerBackdropElement(
 
 private class LowLayerBackdropNode(
     var backdrop: LowGlassBackdrop,
-) : Modifier.Node(), DrawModifierNode {
+) : Modifier.Node(), DrawModifierNode, androidx.compose.ui.node.GlobalPositionAwareModifierNode {
 
     private var ownLayer: GraphicsLayer? = null
 
@@ -289,6 +370,18 @@ private class LowLayerBackdropNode(
         ownLayer?.let { requireGraphicsContext().releaseGraphicsLayer(it) }
         ownLayer = null
         backdrop.layer = null
+    }
+
+    /**
+     * 上报内容层在**窗口坐标**里的位置。
+     *
+     * ★★ 2026-10-05（修「底栏变灰板」配套）：快照只含内容层（原点 = 内容层左上角），
+     * 而玻璃元素用的是窗口坐标 —— 两者相差这个偏移，裁剪时必须减掉。
+     */
+    override fun onGloballyPositioned(coordinates: androidx.compose.ui.layout.LayoutCoordinates) {
+        // ★ 用 `boundsInWindow`（已是本项目多处在用、确认可用的 API）。
+        val b = coordinates.boundsInWindow()
+        backdrop.setLayerOrigin(b.left.toInt(), b.top.toInt())
     }
 
     override fun ContentDrawScope.draw() {

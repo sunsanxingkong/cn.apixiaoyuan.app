@@ -85,6 +85,16 @@ internal object LowGlassPipeline {
         var highlightAlpha: Float = 0f,
         /** 高光描边宽度（px）—— 高版本 `Highlight(width = 1.dp)`。 */
         var highlightStrokeWidthPx: Float = 0f,
+        /**
+         * 高光色自身的 alpha（miuix `strokeAlphaMul`）。
+         *
+         * 高版本 `LiquidGlassTabBar.iosIndicatorSpecular` 的 `BloomStroke.color` 是
+         * `Color.White.copy(alpha = 0.12f)` —— 所以这里默认 **0.12f**。
+         *
+         * ★ 2026-10-05：我此前传 1.0（相当于把描边强度放大 8 倍），
+         * 这是「高光不对」的原因之一。
+         */
+        var highlightStrokeAlphaMul: Float = 0.12f,
         /** 高光内侧羽化半径（px）—— 高版本 `BloomStroke(innerBlurRadius = 2.dp)`。 */
         var highlightInnerBlurPx: Float = 0f,
     )
@@ -350,12 +360,27 @@ internal object LowGlassPipeline {
             val halfView = floatArrayOf(w / 2f, h / 2f)
             val halfViewFloor = floatArrayOf(kotlin.math.floor(w / 2f), kotlin.math.floor(h / 2f))
 
-            // 光源方向 —— 与高版本 `LiquidGlassTabBar.iosIndicatorSpecular` 同源：
-            //   primaryLight   = LightPosition(0.5f, -0.3f, -0.05f)  强度 1.0
-            //   secondaryLight = LightPosition(0.5f,  0.8f, -0.5f)   强度 0.4
-            // LightPosition 是**指向光源**的方向向量（z 为负 = 屏幕外），需归一化。
-            val l1 = normalize3(0.5f, -0.3f, -0.05f)
-            val l2 = normalize3(0.5f, 0.8f, -0.5f)
+            // ★★ 2026-10-05（读 miuix 源码后**修正光源推导**——此前完全错）：
+            //
+            // miuix `applyLightUniforms`（highlight/HighlightStyle.kt）：
+            //   val dx = light.position.x - LIGHT_REF_X   // LIGHT_REF_X = 0.5
+            //   val dy = light.position.y - LIGHT_REF_Y   // LIGHT_REF_Y = 0.7
+            //   val dz = light.position.z
+            //   val len = sqrt(dx² + dy² + dz²); lightDir = (dx/len, dy/len, dz/len)
+            //
+            // 即：**lightDir 是「相对参考点 (0.5, 0.7) 的偏移」归一化**，
+            // 不是光的位置本身。`LightPosition(x, y, z)` 里的 x/y 是 UV 位置，
+            // 只有偏离参考点的那部分才产生方向。
+            //
+            // 我此前直接把 `(0.5, -0.3, -0.05)` 当归一化方向 —— 方向完全错，
+            // 所以高光位置/分布全不对。
+            //
+            // 高版本 `LiquidGlassTabBar.iosIndicatorSpecular` 的两个光源（dualPeak=true）：
+            //   primary   = LightPosition(0.5f, -0.3f, -0.05f), Color.White, intensity = 1f
+            //   secondary = LightPosition(0.5f,  0.8f, -0.5f),  Color.White, intensity = 0.4f
+            // 这里照抄（含 dualPeak 的公式，见 BLOOM_STROKE shader 注释）。
+            val l1 = lightDir(0.5f, -0.3f, -0.05f)
+            val l2 = lightDir(0.5f, 0.8f, -0.5f)
 
             GlGlassRenderer.render(
                 src,
@@ -371,13 +396,18 @@ internal object LowGlassPipeline {
                             "uInnerBlurRadiusSq" to
                                 floatArrayOf(spec.highlightInnerBlurPx * spec.highlightInnerBlurPx),
                             "uHighlightAlpha" to floatArrayOf(spec.highlightAlpha),
-                            "uStrokeAlphaMul" to floatArrayOf(1f),
+                            // ★ `strokeAlphaMul` = 高光色自身的 alpha（miuix 里是 `color.alpha`）。
+                            //   高版本 `iosIndicatorSpecular` 的 BloomStroke.color =
+                            //   `Color.White.copy(alpha = 0.12f)` ⇒ **0.12**。
+                            //   我此前传 1.0 —— 描边强度放大了 8 倍。
+                            "uStrokeAlphaMul" to floatArrayOf(spec.highlightStrokeAlphaMul),
                             "uLightDir1" to l1,
                             "uLightColor1" to floatArrayOf(1f, 1f, 1f),
-                            "uLightIntensity1" to floatArrayOf(1f),
+                            "uLightIntensity1" to floatArrayOf(1.0f),
                             "uLightDir2" to l2,
                             "uLightColor2" to floatArrayOf(1f, 1f, 1f),
                             "uLightIntensity2" to floatArrayOf(0.4f),
+                            // strokeColor：miuix 传的是 `color.copy(alpha = 1f)`，白色。
                             "uStrokeColor" to floatArrayOf(1f, 1f, 1f),
                         ),
                     ),
@@ -386,11 +416,17 @@ internal object LowGlassPipeline {
         }.getOrNull()
     }
 
-    /** 3 维归一化（避免 kotlin 里手写 math 依赖）。 */
-    private fun normalize3(x: Float, y: Float, z: Float): FloatArray {
-        val len = kotlin.math.sqrt(x * x + y * y + z * z)
-        if (len < 1e-6f) return floatArrayOf(0f, 0f, -1f)
-        return floatArrayOf(x / len, y / len, z / len)
+    /**
+     * 把 `LightPosition` 转成归一化的光方向 —— 逐字对应 miuix `applyLightUniforms`。
+     *
+     * `dir = normalize(pos - (0.5, 0.7, 0))`。
+     */
+    private fun lightDir(px: Float, py: Float, pz: Float): FloatArray {
+        val dx = px - 0.5f
+        val dy = py - 0.7f
+        val dz = pz
+        val len = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6f)
+        return floatArrayOf(dx / len, dy / len, dz / len)
     }
 
     /**
@@ -415,14 +451,19 @@ internal object LowGlassPipeline {
         bounds: Rect,
         downscale: Int,
         spec: GlassSpec,
+        originX: Int = 0,
+        originY: Int = 0,
     ): Bitmap? {
         val ds = downscale.coerceAtLeast(1)
         val sw = snapshot.width
         val sh = snapshot.height
-        val l = (bounds.left / ds).coerceIn(0, sw - 1)
-        val t = (bounds.top / ds).coerceIn(0, sh - 1)
-        val r = (bounds.right / ds).coerceIn(l + 1, sw)
-        val b = (bounds.bottom / ds).coerceIn(t + 1, sh)
+        // ★★ 2026-10-05（修「底栏变灰板」配套）：
+        // 快照来自**内容层**（`layerOrigin`），而 bounds 是**窗口坐标** ——
+        // 必须先减掉原点偏移，否则会裁到错位的区域。
+        val l = ((bounds.left - originX) / ds).coerceIn(0, sw - 1)
+        val t = ((bounds.top - originY) / ds).coerceIn(0, sh - 1)
+        val r = ((bounds.right - originX) / ds).coerceIn(l + 1, sw)
+        val b = ((bounds.bottom - originY) / ds).coerceIn(t + 1, sh)
         val w = r - l
         val h = b - t
         if (w <= 0 || h <= 0) return null

@@ -14,6 +14,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -241,16 +242,23 @@ private fun PagerPage(
 }
 
 /**
- * 低版本 Pager + 自写玻璃底栏 —— 与高版本分支**结构一一对应**。
+ * 背景采样泵 —— 定期把内容层抓成位图（供玻璃折射），否则玻璃永远只有第一帧的背景。
  *
- * 对应关系：
- *  - `rememberLayerBackdrop()`（miuix）↔ `rememberLowGlassBackdrop`（Compose GraphicsLayer）
- *  - `.layerBackdrop(backdrop)`      ↔ `.lowLayerBackdrop(backdrop)`
- *  - `LiquidGlassTabBar(...)`        ↔ `LowLiquidGlassTabBar`（自写、参数同源）
- *
- * 另外挂一个**背景采样泵**：定期把内容层抓成位图（供玻璃折射），
- * 否则玻璃永远只有第一帧的背景。抓取内部有节流，静止时不会持续耗电。
+ * ★ 2026-10-05：改为**按需节流**。`LowGlassBackdrop` 内部有两档间隔
+ * （交互 32ms / 静止 200ms），这里每轮问「下一次最早何时能抓」再睡，
+ * 静止时几乎不唤醒。交互方通过 `setActive(true/false)` 切换档位。
  */
+@Composable
+internal fun LowCapturePump(backdrop: cn.apixiaoyuan.app.core.design.glass.low.LowGlassBackdrop) {
+    LaunchedEffect(backdrop) {
+        while (true) {
+            backdrop.capture()
+            // 等到「下一次允许抓帧」的时刻（内部按交互态给 active/idle 两档）。
+            kotlinx.coroutines.delay(backdrop.msUntilNextCapture().coerceIn(8L, 250L))
+        }
+    }
+}
+
 @Composable
 private fun LowPagerWithGlassBar(
     tabs: List<TabItem>,
@@ -261,19 +269,13 @@ private fun LowPagerWithGlassBar(
 ) {
     val lowBackdrop = rememberLowGlassBackdrop()
 
-    // ★ 2026-10-05：绑定宿主 View —— 采样器用 `View.draw(Canvas)` 只拓「需要的区域」，
-    // 而不是每帧全屏 `toImageBitmap()`（那是卡顿主因）。
-    val hostView = androidx.compose.ui.platform.LocalView.current
-    androidx.compose.runtime.LaunchedEffect(hostView) {
-        lowBackdrop.bindHostView(hostView)
-    }
-
-    androidx.compose.runtime.LaunchedEffect(lowBackdrop, pagerState) {
-        while (true) {
-            lowBackdrop.capture()
-            kotlinx.coroutines.delay(80L)
-        }
-    }
+    // ★★ 2026-10-05（用户：「你自己看着是一个东西吗」——修「底栏变灰板」）：
+    //
+    // 采样泵已抽成 [LowCapturePump]（内部按交互态动态节流）。
+    // **不再绑定 hostView** —— 采样走「内容层图层」（`toImageBitmap()`），
+    // 与 miuix 的 `LayerBackdrop` 语义一致：**只含内容，不含玻璃自己**。
+    // （此前用 `hostView.draw()` 会把玻璃也画进去 → 玻璃折射自己 → 收敛成灰板。）
+    LowCapturePump(lowBackdrop)
 
     // 用 Box 提供 BoxScope，才能对底栏用 align(BottomCenter)（与高版本分支结构一致）。
     Box(Modifier.fillMaxSize()) {

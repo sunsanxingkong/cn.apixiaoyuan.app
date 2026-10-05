@@ -313,6 +313,18 @@ internal fun LowLiquidGlassTabBar(
         )
     }
 
+    // ★★ 2026-10-05（治卡顿 + 保按压跟手）：把「是否正在交互」告诉采样源。
+    //
+    // 采样源的节流有两档：交互中 32ms（≈30fps，按压玻璃要跟手），
+    // 静止 200ms（背景没变，抓了也白抓）。
+    // 这里监听按压进度：一开始按压就切高频，抬起后回到静止档。
+    val pressProgressForCapture by remember {
+        derivedStateOf { dampedDragAnimation.pressProgress > 0.01f }
+    }
+    LaunchedEffect(backdrop, pressProgressForCapture) {
+        backdrop.setActive(pressProgressForCapture)
+    }
+
     // ---- 玻璃参数（全部分辨率 px，与高版本的 dp 字面量一一对应） ----
     val blurPx = with(density) { liquidGlassBlurRadius.toPx() }
     val lensHeightPx = with(density) { 24.dp.toPx() }
@@ -333,6 +345,9 @@ internal fun LowLiquidGlassTabBar(
         //   此前我用「上下渐变描边」近似 —— 那是二维的，没有法线，所以怎么调都不像。
         highlightAlpha = 0.75f,
         highlightStrokeWidthPx = with(density) { 1.dp.toPx() },
+        // ★ 高光色自身的 alpha —— 高版本 `iosIndicatorSpecular` 的
+        //   `BloomStroke(color = Color.White.copy(alpha = 0.12f))`，即 0.12。
+        highlightStrokeAlphaMul = 0.12f,
         highlightInnerBlurPx = with(density) { 2.dp.toPx() },
     )
 
@@ -573,7 +588,11 @@ private class LowGlassSurfaceNode(
         // 在后台线程跑：模糊是 RenderScript、折射是逐像素 CPU。
         // 算完切回主线程（withContext 恢复原调度器 = Compose 主线程）。
         computeScope.launch {
-            val out = LowGlassPipeline.renderForElement(context, snapshot, bounds, ds, s)
+            val out = LowGlassPipeline.renderForElement(
+                context, snapshot, bounds, ds, s,
+                originX = backdrop.layerOriginX,
+                originY = backdrop.layerOriginY,
+            )
             if (out != null) {
                 withContext(Dispatchers.Main) {
                     processed = out.asImageBitmap()

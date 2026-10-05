@@ -130,6 +130,12 @@ fun AppNavHost(
             entry<RoutePkGrind>(swipeDismiss = NavSwipeDirection.LeftToRight) {
                 cn.apixiaoyuan.app.feature.pk.PkGrindScreen(navController)
             }
+            // ★ 2026-10-05 新增：比赛竞速（开学季，内置 pk-node 驱动）。
+            entry<cn.apixiaoyuan.app.core.navigation.RouteRace>(
+                swipeDismiss = NavSwipeDirection.LeftToRight,
+            ) {
+                cn.apixiaoyuan.app.feature.grind.RaceScreen(navController)
+            }
             // 「账号分数 / 任务」—— 刷分区的只读观测台（★ 2026-09-30）
             entry<cn.apixiaoyuan.app.core.navigation.RouteAccountStats>(
                 swipeDismiss = NavSwipeDirection.LeftToRight,

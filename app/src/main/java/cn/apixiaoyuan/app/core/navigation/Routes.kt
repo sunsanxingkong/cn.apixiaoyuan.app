@@ -152,11 +152,22 @@ data object RouteOldSimian : Route
 /** 「自定义分数（刷分）」二级页。 */
 @Serializable
 data object RouteScorePump : Route
-
-/** 「刷 PK 对局」二级页（纯 API 刷局：出题→弧线笔迹→提交）。 */
+/**
+ * 「刷 PK 对局」二级页（纯 API 刷局：出题→弧线笔迹→提交）。
+ */
 @Serializable
 data object RoutePkGrind : Route
 
+/**
+ * 「比赛竞速」二级页（★ 2026-10-05）—— 开学季竞速（`2026autumnRace`）。
+ *
+ * 刷分区第三条链路：官方活动全流程（活动主页 → 8 人匹配 → WebSocket 对战 →
+ * 逐题作答 → 结算 → 榜单），由内置 pk-node 驱动（与网页端同一套实现，见
+ * `RaceScreen` 的 KDoc）。支持「贴限模式」（自动贴该榜上榜下限抢名次）
+ * 与子账号切换。
+ */
+@Serializable
+data object RouteRace : Route
 /**
  * 刷分区（二级页）—— 从主页进入的刷分总控。
  *

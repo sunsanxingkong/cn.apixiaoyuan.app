@@ -18,6 +18,7 @@ import cn.apixiaoyuan.app.core.navigation.AppNavController
 import cn.apixiaoyuan.app.core.navigation.RouteAccountStats
 import cn.apixiaoyuan.app.core.navigation.RouteExercisePump
 import cn.apixiaoyuan.app.core.navigation.RoutePkGrind
+import cn.apixiaoyuan.app.core.navigation.RouteRace
 import cn.apixiaoyuan.app.core.navigation.RouteScorePump
 import cn.apixiaoyuan.app.core.oldsimian.OldSimianPrefs
 import top.yukonga.miuix.kmp.basic.Card
@@ -82,6 +83,12 @@ fun GrindScreen(navController: AppNavController) {
                     summary = "直接上报经验增量，不需要出题做题。注意：同一 ruleType 每天只记一次，" +
                         "可记账类型仅 0/1 ⇒ 日上限 400",
                     onClick = { navController.navigate(RouteScorePump) },
+                )
+                EntryRow(
+                    title = "比赛竞速",
+                    summary = "开学季竞速（官方活动）：活动主页 → 8 人匹配 → WebSocket 对战 → 逐题作答 → 结算。" +
+                        "支持「贴限模式」（自动贴该榜下限抢名次）与子账号切换，由内置 pk-node 驱动",
+                    onClick = { navController.navigate(RouteRace) },
                 )
             }
 

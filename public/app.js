@@ -1,0 +1,2875 @@
+'use strict';
+// pk-node 前端。原生 JS，无框架、无构建。
+
+/* ------------------------------ 基础 ------------------------------ */
+
+const $ = (id) => document.getElementById(id);
+
+/** 统一的 API 调用：自动带 cookie，非 2xx 抛错并带 message。 */
+async function api(path, options) {
+  const opt = Object.assign({ credentials: 'same-origin' }, options || {});
+  if (opt.body && typeof opt.body !== 'string') {
+    opt.headers = Object.assign({ 'Content-Type': 'application/json' }, opt.headers || {});
+    opt.body = JSON.stringify(opt.body);
+  }
+  const res = await fetch(path, opt);
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (!res.ok) {
+    // 会话失效（被禁用 / 改密 / 过期）→ 直接提示并退回登录页。
+    if (res.status === 401 && state.user) {
+      toast('登录已失效（账号可能被管理员禁用），正在返回登录页…', 'err');
+      setTimeout(() => location.reload(), 1200);
+    }
+    const msg = (data && data.message) || ('HTTP ' + res.status);
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+let toastTimer = null;
+function toast(msg, kind) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + (kind || '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = 'toast hidden'; }, 4000);
+}
+
+/**
+ * 日志容器自动跟随滚动（对齐 Android 端 [AutoFollowScroll]）：
+ *  - 挂一次 scroll 监听（幂等），判断是否在底部 → 开关 autoFollow；
+ *  - 追加内容时若 autoFollow 则平滑滚到底。
+ * 不用 behavior:'smooth'（固定时长，高频日志会一顿一顿）；
+ * 不用 scrollIntoView（会把外层页面一起滚）。
+ * 二阶阻尼弹簧逐帧积分：a=(k*(target-x)-c*v)/m，速度连续 → 连贯下滑。
+ */
+const SPRING_K = 130, SPRING_C = 24, SPRING_M = 1;
+const SPRING_MAX_DT = 0.032;   // 掉帧钳位（秒，对齐 dsh）
+const SPRING_REST_V = 1.0;     // 速度阈值（px/s）
+
+function springState(container) {
+  if (!container.__spring) container.__spring = { x: 0, v: 0, raf: 0, last: 0 };
+  return container.__spring;
+}
+
+function ensureAutoFollow(container) {
+  if (!container || container.dataset.autoFollowBound === '1') return;
+  container.dataset.autoFollowBound = '1';
+  container.dataset.autoFollow = '1';   // 初始跟随
+  container.addEventListener('scroll', () => {
+    // 我们自己发起的动画期间不要改开关（否则会被自己关掉）。
+    if (container.dataset.animating === '1') return;
+    const gap = container.scrollHeight - container.scrollTop - container.clientHeight;
+    // 距底 < 48px 视为「在底部」→ 打开跟随；否则（用户上滑了）→ 关闭。
+    container.dataset.autoFollow = gap < 48 ? '1' : '0';
+  }, { passive: true });
+}
+
+/** 弹簧跟随到底：rAF 逐帧积分（速度连续，所以连贯、不顿）。 */
+function smoothScrollToBottom(container) {
+  const st = springState(container);
+  if (st.raf) return;                  // 已在跑 → 单帧循环会自然追上新的 scrollHeight
+  const maxTop = container.scrollHeight - container.clientHeight;
+  if (maxTop - container.scrollTop <= 0) return;
+  st.x = container.scrollTop;
+  st.v = 0;
+  st.last = 0;
+  container.dataset.animating = '1';
+  st.raf = requestAnimationFrame(function step(now) {
+    const s = springState(container);
+    const dt = s.last ? Math.min(SPRING_MAX_DT, (now - s.last) / 1000) : (1 / 60);
+    s.last = now;
+    // 目标恒为「滚到底」——内容继续变高时 maxTop 变大，弹簧自然接着追。
+    const target = container.scrollHeight - container.clientHeight;
+    const a = (SPRING_K * (target - s.x) - SPRING_C * s.v) / SPRING_M;
+    s.v += a * dt;
+    s.x += s.v * dt;
+    if (s.x < 0) { s.x = 0; s.v = 0; }
+    if (s.x > target) { s.x = target; }
+    container.scrollTop = s.x;
+    if (Math.abs(target - s.x) < 0.5 && Math.abs(s.v) < SPRING_REST_V) {
+      container.scrollTop = target;
+      s.raf = 0; s.last = 0; s.v = 0;
+      container.dataset.animating = '0';
+      return;
+    }
+    s.raf = requestAnimationFrame(step);
+  });
+}
+
+/** 往日志容器追加一行；仅在「跟随中」时平滑滚到底。 */
+function logLine(container, text, cls) {
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = text;
+  // 心跳行靠 data-tick 标记，便于原地更新而不是刷屏
+  if (!div.dataset) div.dataset = {};
+  container.appendChild(div);
+  ensureAutoFollow(container);
+  if (container.dataset.autoFollow === '1') smoothScrollToBottom(container);
+  return div;
+}
+
+function fmtTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+/* ------------------------------ 状态 ------------------------------ */
+
+const state = {
+  user: null,
+  leoAccounts: [],
+  /** 设备链池（供账号卡片上的「用哪条设备链」下拉复用）。 */
+  leoChains: [],
+  subs: [],
+  currentJobId: null,
+  jobStream: null,
+  pollTimer: null,
+  streamErrorNotified: false,
+  seenRounds: new Set(),
+  practiceStream: null,
+  /** 当前正在看的「刷练习」任务 id（后台任务）。 */
+  practiceJobId: null,
+  /** 竞速日志流与任务 id（与练习同款）。 */
+  raceStream: null,
+  raceJobId: null,
+  /** 最近一次竞速「获取知识点」缓存的 home 数据（榜单查询要用 pointId）。 */
+  raceHome: null,
+  /** 事件流心跳看门狗（隧道下判定「流是否还活着」）。 */
+  watchdogTimer: null,
+  /** 最近一次收到事件流数据的时间（看门狗用）。 */
+  lastEventAt: 0,
+  /** 最近一次往日志区写「流/轮询异常提示」的时间（做限频，避免刷屏）。 */
+  lastLoggedAt: 0,
+  /** 轮询兜底最近一次是否成功（用于区分「没日志」是没任务还是流断了）。 */
+  pollOk: null,
+};
+
+/* ------------------------------ 登录 ------------------------------ */
+
+function showView(name) {
+  $('view-auth').classList.toggle('hidden', name !== 'auth');
+  $('view-app').classList.toggle('hidden', name !== 'app');
+}
+
+async function refreshMe() {
+  const r = await api('/api/auth/me');
+  state.user = r.user;
+  if (!r.user) { showView('auth'); return false; }
+  showView('app');
+  $('who').textContent = r.user.username + (r.user.role === 'admin' ? '（管理员）' : '');
+  document.querySelectorAll('.admin-only').forEach((el) => {
+    el.classList.toggle('hidden', r.user.role !== 'admin');
+  });
+  return true;
+}
+
+$('form-login').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/api/auth/login', { method: 'POST', body: { username: $('login-user').value, password: $('login-pass').value } });
+    toast('登录成功', 'ok');
+    if (await refreshMe()) { await bootstrapAfterLogin(); }
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+$('form-register').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/api/auth/register', { method: 'POST', body: { username: $('reg-user').value, password: $('reg-pass').value } });
+    toast('注册成功，正在登录…', 'ok');
+    await api('/api/auth/login', { method: 'POST', body: { username: $('reg-user').value, password: $('reg-pass').value } });
+    if (await refreshMe()) { await bootstrapAfterLogin(); }
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+document.querySelectorAll('[data-auth-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-auth-tab]').forEach((b) => b.classList.toggle('active', b === btn));
+    const isLogin = btn.dataset.authTab === 'login';
+    $('form-login').classList.toggle('hidden', !isLogin);
+    $('form-register').classList.toggle('hidden', isLogin);
+  });
+});
+
+$('btn-logout').addEventListener('click', async () => {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { /* 忽略 */ }
+  location.reload();
+});
+
+/* --------------------------- 顶部导航 --------------------------- */
+
+document.querySelectorAll('.nav-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    ['grind', 'pkpage', 'practice', 'race', 'accounts', 'jobs', 'me', 'tunnel', 'admin'].forEach((t) => {
+      $('tab-' + t).classList.toggle('hidden', t !== btn.dataset.tab);
+    });
+    const t = btn.dataset.tab;
+    if (t === 'pkpage') { loadPkPage(); }
+    if (t === 'practice') { loadPractice(); }
+    if (t === 'race') { restoreRaceJob(); }
+    if (t === 'accounts') { loadDeviceChains(); }
+    if (t === 'accounts') { loadLeoAccounts(); }
+    if (t === 'jobs') { loadJobs(); }
+    if (t === 'me') { renderProfile(); loadMyLogins(); loadMySessions(); loadTrustedIps(); }
+    if (t === 'tunnel') { loadTunnel(); }
+    if (t === 'admin') { loadAdmin(); loadAdminLeo(); loadAdminLogins(); loadAdminSessions(); }
+  });
+});
+
+/* ------------------------- PK 页面（H5 容器） ------------------------- */
+
+/**
+ * 填充 PK 页的账号/子账号下拉。
+ *
+ * 复用 [state.leoAccounts]（bootstrapAfterLogin 已拉过），避免重复请求。
+ */
+async function loadPkPage() {
+  if (!state.leoAccounts || state.leoAccounts.length === 0) {
+    try {
+      const r = await api('/api/leo/accounts');
+      state.leoAccounts = r.accounts || [];
+    } catch (e) { /* 忽略 */ }
+  }
+  const sel = $('pkpage-leo');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  const list = state.leoAccounts || [];
+  if (list.length === 0) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '（尚未导入小猿账号）';
+    sel.appendChild(o);
+    $('pkpage-hint').textContent = '先去「小猿账号」页导入一个账号（短信 / 密码 / 粘贴 cookie 都行）。';
+    return;
+  }
+  for (const a of list) {
+    const o = document.createElement('option');
+    o.value = String(a.id);
+    o.textContent = a.name + '（uid ' + (a.yfdU || '?') + '）';
+    sel.appendChild(o);
+  }
+  if (prev && list.some((a) => String(a.id) === prev)) sel.value = prev;
+
+  await loadPkPageSubs();
+  $('pkpage-hint').textContent = '点「打开 PK 页面」加载原版 H5。若页面空白，先看浏览器控制台的 __pkH5Hook。';
+}
+
+/** 拉 PK 页的子账号下拉。 */
+async function loadPkPageSubs() {
+  const id = Number($('pkpage-leo').value);
+  const sel = $('pkpage-sub');
+  sel.innerHTML = '<option value="">（当前身份）</option>';
+  if (!id) return;
+  try {
+    const r = await api('/api/leo/accounts/' + id + '/sub-accounts');
+    for (const s of (r.subs || [])) {
+      const o = document.createElement('option');
+      o.value = String(s.userId);
+      o.textContent = (s.nickname || ('账号 ' + s.userId)) + (s.isPrimary ? '（主）' : '');
+      sel.appendChild(o);
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+/** 打开（或重新加载）PK H5 容器。 */
+function openPkPage() {
+  const id = $('pkpage-leo').value;
+  if (!id) return toast('先导入小猿账号', 'err');
+  const frame = $('pkpage-frame');
+  // 带上 leoAccountId：hook 拼进 API 代理 URL，Node 用它选账号 jar。
+  // 自动能力由 URL 参数 pkbot=... 驱动；没勾就传 off（显式全关）。
+  const caps = [];
+  if ($('pkbot-answer') && $('pkbot-answer').checked) caps.push('answer');
+  if ($('pkbot-stroke') && $('pkbot-stroke').checked) caps.push('autoStroke');
+  if ($('pkbot-next') && $('pkbot-next').checked) caps.push('autoNext');
+  const pkbot = caps.length ? caps.join(',') : 'off';
+  frame.src = '/pk-h5/pk.html?leoAccountId=' + encodeURIComponent(id) +
+    '&pkbot=' + encodeURIComponent(pkbot) + '&t=' + Date.now();
+  $('pkpage-hint').textContent = '正在加载原版 PK H5…（账号 id=' + id +
+    '，自动能力：' + (caps.length ? caps.join(' / ') : '无') + '）';
+}
+
+$('pkpage-leo').addEventListener('change', loadPkPageSubs);
+$('pkpage-open').addEventListener('click', openPkPage);
+$('pkpage-reload').addEventListener('click', openPkPage);
+
+/* ---------------------------- 刷局页 ---------------------------- */
+
+async function loadLeoAccounts() {
+  const r = await api('/api/leo/accounts');
+  state.leoAccounts = r.accounts;
+
+  // 刷局页账号下拉
+  const sel = $('grind-leo');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  if (r.accounts.length === 0) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '（尚未导入小猿账号）';
+    sel.appendChild(o);
+  }
+  for (const a of r.accounts) {
+    const o = document.createElement('option');
+    o.value = String(a.id);
+    o.textContent = a.name + '（uid ' + (a.yfdU || '?') + '）';
+    sel.appendChild(o);
+  }
+  if (prev && r.accounts.some((a) => String(a.id) === prev)) sel.value = prev;
+
+  renderLeoList(r.accounts);
+  // 批量开任务的多选列表（刷局 / 刷练习各一份，共用同一批账号）
+  renderBatchPicker('grind-batch', r.accounts, batchSel.grind);
+  renderBatchPicker('prac-batch', r.accounts, batchSel.prac);
+  fillRaceLeo(r.accounts);
+  await loadSubsForSelectedLeo();
+}
+
+function renderLeoList(accounts) {
+  const box = $('leo-list');
+  box.innerHTML = '';
+  if (accounts.length === 0) {
+    box.innerHTML = '<p class="muted small">还没有导入小猿账号。</p>';
+    return;
+  }
+  for (const a of accounts) {
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.innerHTML =
+      '<div><div class="title"></div><div class="meta"></div></div>' +
+      '<div class="actions">' +
+      '<button class="mini" data-act="identity">当前身份</button>' +
+      '<button class="mini" data-act="chain">复制设备链</button>' +
+      '<button class="mini" data-act="ck">显示 CK</button>' +
+      '<button class="mini" data-act="refresh">刷新子账号</button>' +
+      '<button class="mini" data-act="subs">查看</button>' +
+      '<button class="mini danger" data-act="del">删除</button>' +
+      '</div>' +
+      // 这个账号固定使用池里哪一份设备链；选「自动」= 跑到时才在池里随机挑一份
+      '<div class="chain-row">' +
+      '<label class="muted small">设备链</label>' +
+      '<select data-chain-sel="' + a.id + '" title="选择这个账号使用的设备链"></select>' +
+      '<span class="chain-tag"></span>' +
+      '</div>' +
+      // 自己的账号：默认隐藏，点「显示 CK」展开明文 + 复制（CK 不外泄到日志）
+      '<div class="ck-box hidden"><code class="ck-text"></code> <button class="mini" data-act="copyck">复制 CK</button></div>' +
+      // 子账号：默认隐藏，点标题栏「子账号」折叠展开（含昵称 / 年级 / 身份）
+      '<div class="subs-box hidden"></div>';
+    el.querySelector('.title').textContent = a.name;
+    const ks = (a.cookieNames || []).filter((n) => n.indexOf('ks_') === 0);
+    const subs = a.subAccounts || [];
+    el.querySelector('.meta').textContent =
+      '手机号 ' + (a.phoneMasked || '未绑定') +
+      ' · uid ' + (a.yfdU || '?') + ' · 年级 ' + (a.grade == null ? '?' : a.grade) +
+      ' · cookie ' + (a.cookieNames || []).length + ' 条' +
+      ' · 子账号 ' + subs.length + ' 个' +
+      (ks.length ? ' · 设备链 ✓(' + ks.length + ')' : ' · 设备链 ✗（PK 刷不了，可「复制设备链」）');
+    // 子账号列表（自己的账号能看到自己名下的子账号）
+    const subsBox = el.querySelector('.subs-box');
+    if (subs.length) {
+      const sb = document.createElement('div');
+      sb.className = 'subs-list';
+      for (const s of subs) {
+        const row = document.createElement('div');
+        row.className = 'sub-row';
+        row.textContent = (s.isPrimary ? '★ ' : '· ') + (s.nickname || '(无名)') +
+          ' · 年级 ' + (s.grade == null ? '?' : s.grade) + ' · uid ' + s.userId;
+        sb.appendChild(row);
+      }
+      subsBox.appendChild(sb);
+    } else {
+      subsBox.innerHTML = '<span class="muted small">（没有子账号，可点「刷新子账号」拉取）</span>';
+    }
+    // 当前身份以服务端回包为准（子账号切换本服务做不到，见 docs）
+    el.querySelector('[data-act="identity"]').addEventListener('click', async () => {
+      try {
+        const r = await api('/api/leo/accounts/' + a.id + '/identity');
+        const cur = r.currentIdentity;
+        toast(cur == null
+          ? '取不到生效身份（登录态可能已失效）'
+          : '实际生效身份：' + cur + (String(cur) === String(a.yfdU) ? '（与库中一致）' : '（注意：与库中 uid 不一致）'),
+          cur == null ? 'err' : 'ok');
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    el.querySelector('[data-act="chain"]').addEventListener('click', async () => {
+      const others = (state.leoAccounts || []).filter((x) => x.id !== a.id);
+      if (others.length === 0) return toast('没有其它账号可作为设备链来源', 'err');
+      const src = prompt('从哪个账号复制设备链（填序号或 id）？\n' +
+        others.map((x, i) => (i + 1) + '. ' + x.name + ' (id=' + x.id + ', 设备链' +
+          ((x.cookieNames || []).some((n) => n.indexOf('ks_') === 0) ? '✓' : '✗') + ')').join('\n'));
+      if (!src) return;
+      const idx = Number(src) - 1;
+      const pick = (idx >= 0 && idx < others.length && String(Number(src)) === String(idx + 1))
+        ? others[idx] : others.find((x) => String(x.id) === String(src));
+      if (!pick) return toast('没找到该账号', 'err');
+      try {
+        const r = await api('/api/leo/accounts/' + a.id + '/device-chain', {
+          method: 'POST', body: { sourceId: pick.id },
+        });
+        toast(r.message || '已复制设备链', r.ok ? 'ok' : 'err');
+        await loadLeoAccounts();
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    el.querySelector('[data-act="refresh"]').addEventListener('click', async () => {
+      try {
+        const r = await api('/api/leo/accounts/' + a.id + '/refresh', { method: 'POST' });
+        toast(r.message || '已刷新', r.ok ? 'ok' : 'err');
+        await loadLeoAccounts();
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    // 展开 / 收起该账号名下的子账号列表
+    el.querySelector('[data-act="subs"]').addEventListener('click', (e) => {
+      if (subsBox.classList.contains('hidden')) {
+        subsBox.classList.remove('hidden');
+        e.target.textContent = '收起子账号';
+      } else {
+        subsBox.classList.add('hidden');
+        e.target.textContent = '查看';
+      }
+    });
+    // 显示/隐藏自己的 CK（cookie 明文），默认隐藏
+    const ckBox = el.querySelector('.ck-box');
+    const ckText = el.querySelector('.ck-text');
+    el.querySelector('[data-act="ck"]').addEventListener('click', (e) => {
+      if (ckBox.classList.contains('hidden')) {
+        ckText.textContent = a.cookieHeader || '(无 cookie)';
+        ckBox.classList.remove('hidden');
+        e.target.textContent = '隐藏 CK';
+      } else {
+        ckBox.classList.add('hidden');
+        e.target.textContent = '显示 CK';
+      }
+    });
+    el.querySelector('[data-act="copyck"]').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(a.cookieHeader || '');
+        toast('已复制 CK', 'ok');
+      } catch {
+        toast('复制失败，请手动选择', 'err');
+      }
+    });
+    el.querySelector('[data-act="del"]').addEventListener('click', async () => {
+      if (!confirm('确定删除该小猿账号？其登录态将从本地库移除。')) return;
+      try {
+        await api('/api/leo/accounts/' + a.id, { method: 'DELETE' });
+        toast('已删除', 'ok');
+        await loadLeoAccounts();
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    box.appendChild(el);
+  }
+  syncLeoChainSelects();
+}
+
+/** 设备链下拉的选项由 state.leoChains 填充（ chains 与 accounts 先后加载，取值统一放在渲染后再同步）。 */
+function syncLeoChainSelects() {
+  const chains = state.leoChains || [];
+  document.querySelectorAll('#leo-list [data-chain-sel]').forEach((sel) => {
+    const accId = Number(sel.getAttribute('data-chain-sel'));
+    const acc = (state.leoAccounts || []).find((a) => String(a.id) === String(accId));
+    if (!acc) return;
+    const cur = acc.deviceChainId == null || acc.deviceChainId === '' ? '' : String(acc.deviceChainId);
+    const prev = sel.value;
+
+    sel.innerHTML = '';
+    const oAuto = document.createElement('option');
+    oAuto.value = '';
+    oAuto.textContent = '自动（池里轮换一份）';
+    sel.appendChild(oAuto);
+
+    for (const c of chains) {
+      const o = document.createElement('option');
+      o.value = String(c.id);
+      const shortDev = c.deviceId ? String(c.deviceId).slice(0, 10) : '';
+      o.textContent = c.label + '（' + (c.deviceId ? shortDev : '无 deviceid') + (c.enabled ? '' : ' · 停用') + '）';
+      sel.appendChild(o);
+    }
+    // 当前绑定值若还在选项里就选中它，否则退回「自动」
+    sel.value = Array.from(sel.options).some((o) => o.value === cur) ? cur : '';
+    if (prev && !sel.value) sel.value = prev;   // 保存请求的途中别把用户的选择弹回自动
+
+    const tag = sel.parentElement && sel.parentElement.querySelector('.chain-tag');
+    if (tag) {
+      const bound = chains.find((c) => String(c.id) === sel.value);
+      tag.textContent = sel.value === ''
+        ? '未指定（导入/跑任务时自动挑一条）'
+        : '已指定使用：' + (bound ? bound.label : '设备链 #' + sel.value);
+    }
+
+    if (!sel.dataset.bound) {
+      sel.dataset.bound = '1';
+      sel.addEventListener('change', () => { saveLeoChainBinding(accId, sel.value); });
+    }
+  });
+}
+
+/** 保存「某账号使用哪份设备链」；value='' 表示不指定（自动轮换）。 */
+async function saveLeoChainBinding(accId, value) {
+  try {
+    const r = await api('/api/leo/accounts/' + accId + '/chain', {
+      method: 'PUT',
+      body: { deviceChainId: value === '' ? null : Number(value) },
+    });
+    const acc = (state.leoAccounts || []).find((a) => String(a.id) === String(accId));
+    if (acc) acc.deviceChainId = r.deviceChainId == null ? null : Number(r.deviceChainId);
+    const c = (state.leoChains || []).find((x) => String(x.id) === String(r.deviceChainId));
+    toast(r.deviceChainId == null ? '已改为：自动（池里轮换）' : '已指定使用：' + (c ? c.label : ('设备链 #' + r.deviceChainId)), 'ok');
+    syncLeoChainSelects();
+  } catch (e) {
+    toast(e.message, 'err');
+    syncLeoChainSelects();   // 失败就把下拉弹回库里的真实值
+  }
+}
+
+async function loadSubsForSelectedLeo() {
+  const id = Number($('grind-leo').value);
+  const sel = $('grind-sub');
+  sel.innerHTML = '<option value="">（当前身份）</option>';
+  if (!id) return;
+  try {
+    const r = await api('/api/leo/accounts/' + id + '/sub-accounts');
+    for (const s of r.subs) {
+      const o = document.createElement('option');
+      o.value = String(s.userId);
+      o.textContent = (s.nickname || ('账号 ' + s.userId)) + (s.isPrimary ? '（主）' : '');
+      sel.appendChild(o);
+    }
+  } catch (e) { /* 忽略：不影响刷局 */ }
+}
+
+$('grind-leo').addEventListener('change', loadSubsForSelectedLeo);
+
+/* --------------------- 小猿账号：三个添加方式的分页 --------------------- */
+
+document.querySelectorAll('[data-leo-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-leo-tab]').forEach((b) => b.classList.toggle('active', b === btn));
+    const t = btn.dataset.leoTab;
+    ['sms', 'password', 'cookie', 'qr'].forEach((k) => {
+      $('leo-pane-' + k).classList.toggle('hidden', k !== t);
+    });
+    if (t !== 'qr') stopQrPoll();
+    $('leo-msg').textContent = '';
+  });
+});
+
+/* --------------------- 小猿账号：扫码登录（QR） --------------------- */
+
+/** 当前轮询二维码状态的定时器（无二维码时为 null）。 */
+let qrPollTimer = null;
+let qrKey = null;
+
+/** 停止二维码轮询（切走标签 / 取消 / 完成时调用）。幂等、可安全重复调用。 */
+function stopQrPoll() {
+  if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; }
+  qrKey = null;
+  const box = $('qr-box');
+  if (box) box.classList.add('hidden');
+}
+
+if ($('btn-qr-create')) {
+  $('btn-qr-create').addEventListener('click', async () => {
+    stopQrPoll();
+    const box = $('qr-box');
+    const img = $('qr-img');
+    const st = $('qr-status');
+    box.classList.remove('hidden');
+    st.textContent = '正在生成二维码…';
+    img.removeAttribute('src');
+    try {
+      const r = await api('/api/leo/login/qr/create', {
+        method: 'POST', body: { name: $('qr-name').value.trim() },
+      });
+      if (!r.ok) throw new Error(r.message || '生成失败');
+      qrKey = r.qrKey;
+      // qrContent 可能是 URL 或一段文本；用二维码渲染服务生成图片（本地无二维码库，尽量不引外部依赖）
+      img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(r.qrContent || '');
+      st.textContent = '请用小猿 App 扫码并在手机上确认登录…';
+      qrPollTimer = setInterval(pollQrOnce, 2500);
+    } catch (err) {
+      st.textContent = '生成失败：' + (err.message || '未知错误') +
+        '（该功能端点为推测值，可能需真机抓包校准）';
+      toast('扫码登录不可用：' + (err.message || ''), 'err');
+    }
+  });
+}
+if ($('btn-qr-cancel')) {
+  $('btn-qr-cancel').addEventListener('click', () => { stopQrPoll(); leoMsg('已取消扫码登录', true); });
+}
+
+/** 轮询一次扫码状态；status=2 表示已确认并导入成功。 */
+async function pollQrOnce() {
+  if (!qrKey) return;
+  try {
+    const r = await api('/api/leo/login/qr/poll?qrKey=' + encodeURIComponent(qrKey));
+    const st = $('qr-status');
+    if (r.status === 2) {
+      stopQrPoll();
+      leoMsg('扫码登录成功，已导入账号' + (r.subs ? '（含 ' + r.subs + ' 个子账号）' : ''), true);
+      toast('扫码登录成功', 'ok');
+      await loadLeoAccounts();
+    } else if (r.status === 3) {
+      stopQrPoll();
+      st.textContent = '二维码已过期，请重新生成';
+    } else if (r.status === 1) {
+      st.textContent = '已扫码，请在手机上点「确认登录」…';
+    }
+  } catch (err) {
+    stopQrPoll();
+    const st = $('qr-status');
+    if (st) st.textContent = '轮询失败：' + (err.message || '');
+  }
+}
+
+/** 短信登录会话 token（发码后由服务端下发，交码时必须带回去）。 */
+let smsToken = null;
+
+function leoMsg(text, ok) {
+  const el = $('leo-msg');
+  el.textContent = text;
+  el.style.color = ok ? 'var(--ok)' : 'var(--danger)';
+}
+
+$('btn-sms-send').addEventListener('click', async () => {
+  const phone = $('sms-phone').value.trim();
+  if (!/^1[3-9]\d{9}$/.test(phone)) return leoMsg('请输入正确的 11 位手机号', false);
+  const btn = $('btn-sms-send');
+  btn.disabled = true;
+  btn.textContent = '发送中…';
+  leoMsg('正在请求发送…', true);
+  try {
+    const r = await api('/api/leo/login/sms/send', { method: 'POST', body: { phone: phone, token: smsToken } });
+    smsToken = r.token || smsToken;
+    leoMsg(r.message, true);
+    toast(r.message, r.alreadySent ? '' : 'ok');
+    // 冷却态给个倒计时，避免用户狂点
+    if (r.alreadySent) {
+      let left = 60;
+      btn.textContent = left + 's 后重发';
+      const t = setInterval(() => {
+        left -= 1;
+        if (left <= 0) { clearInterval(t); btn.disabled = false; btn.textContent = '发送验证码'; }
+        else btn.textContent = left + 's 后重发';
+      }, 1000);
+      return;
+    }
+  } catch (err) {
+    leoMsg('发送失败：' + err.message, false);
+    toast(err.message, 'err');
+  }
+  btn.disabled = false;
+  btn.textContent = '发送验证码';
+});
+
+$('btn-sms-login').addEventListener('click', async () => {
+  const code = $('sms-code').value.trim();
+  if (!code) return leoMsg('请填写收到的验证码', false);
+  if (!smsToken) return leoMsg('请先点「发送验证码」', false);
+  const btn = $('btn-sms-login');
+  btn.disabled = true;
+  btn.textContent = '登录中…';
+  try {
+    const r = await api('/api/leo/login/sms/submit', {
+      method: 'POST',
+      body: { token: smsToken, code: code, name: $('leo-name').value },
+    });
+    leoMsg(r.message + (r.yfdU ? '（uid ' + r.yfdU + '）' : ''), true);
+    toast('登录成功', 'ok');
+    smsToken = null;
+    $('sms-code').value = '';
+    await loadLeoAccounts();
+  } catch (err) {
+    leoMsg('登录失败：' + err.message, false);
+    toast(err.message, 'err');
+  }
+  btn.disabled = false;
+  btn.textContent = '登录';
+});
+
+$('btn-pw-login').addEventListener('click', async () => {
+  const phone = $('pw-phone').value.trim();
+  const password = $('pw-pass').value;
+  if (!/^1[3-9]\d{9}$/.test(phone)) return leoMsg('请输入正确的 11 位手机号', false);
+  if (!password) return leoMsg('请输入密码', false);
+  const btn = $('btn-pw-login');
+  btn.disabled = true;
+  btn.textContent = '登录中…';
+  try {
+    const r = await api('/api/leo/login/password', {
+      method: 'POST',
+      body: { phone: phone, password: password, name: $('leo-name').value },
+    });
+    leoMsg(r.message + (r.yfdU ? '（uid ' + r.yfdU + '）' : ''), true);
+    toast('登录成功', 'ok');
+    $('pw-pass').value = '';
+    await loadLeoAccounts();
+  } catch (err) {
+    leoMsg('登录失败：' + err.message, false);
+    toast(err.message, 'err');
+  }
+  btn.disabled = false;
+  btn.textContent = '登录';
+});
+
+$('btn-import').addEventListener('click', async () => {
+  const msg = $('leo-msg');
+  msg.textContent = '导入中…';
+  try {
+    const r = await api('/api/leo/accounts', {
+      method: 'POST',
+      body: { name: $('leo-name').value || '小猿账号', cookie: $('leo-cookie').value },
+    });
+    // 粘贴内容自带设备链时，服务端会把它收进池并绑到这个账号上 → 池列表要跟着刷新
+    msg.textContent = '导入成功：' + (r.message || '') + '（uid ' + r.yfdU + '）';
+    toast('导入成功', 'ok');
+    $('leo-cookie').value = '';
+    await loadDeviceChains();
+    await loadLeoAccounts();
+  } catch (err) {
+    msg.textContent = '导入失败：' + err.message;
+    toast(err.message, 'err');
+  }
+});
+
+$('btn-load-points').addEventListener('click', async () => {
+  const id = Number($('grind-leo').value);
+  if (!id) return toast('先导入小猿账号', 'err');
+  const box = $('point-list');
+  box.innerHTML = '<span class="muted small">拉取中…</span>';
+  try {
+    const r = await api('/api/pk/points?leoAccountId=' + id + '&grade=' + (state.grade || 2));
+    const list = (r.home && r.home.pointList) || [];
+    box.innerHTML = '';
+    if (list.length === 0) { box.innerHTML = '<span class="muted small">没有知识点</span>'; return; }
+    for (const p of list) {
+      const c = document.createElement('span');
+      c.className = 'chip';
+      c.textContent = p.pointName + ' (' + p.pointId + ')';
+      c.addEventListener('click', () => { $('grind-point').value = String(p.pointId); });
+      box.appendChild(c);
+    }
+    if (r.home && r.home.totalWinCount != null) {
+      toast('本周胜场 ' + (r.home.weekWinCount || 0) + ' / 总胜场 ' + r.home.totalWinCount, 'ok');
+    }
+  } catch (err) {
+    box.innerHTML = '';
+    toast(err.message, 'err');
+  }
+});
+
+$('btn-start').addEventListener('click', async () => {
+  const leoAccountId = Number($('grind-leo').value);
+  if (!leoAccountId) return toast('先导入小猿账号', 'err');
+
+  // 参数解析抽成 collectPkBody()：单开与「批量开」共用同一份代码，避免两边漂移
+  const body = Object.assign({
+    leoAccountId: leoAccountId,
+    subUserId: $('grind-sub').value ? Number($('grind-sub').value) : null,
+  }, collectPkBody());
+
+  $('log').innerHTML = '';
+  try {
+    const r = await api('/api/jobs', { method: 'POST', body: body });
+    if (!r.ok) return toast(r.message || '启动失败', 'err');
+    state.currentJobId = r.jobId;
+    attachJobStream(r.jobId);
+    // 允许并行：开始按钮**不禁用**（可以再开一个任务）；停止按钮指向最近这个任务
+    $('btn-stop').disabled = false;
+    $('job-badge').textContent = '#' + r.jobId;
+    $('job-badge').className = 'badge run';
+    toast('已开始，' + body.rounds + ' 局 · ' + (body.strokeMode === 'ARC' ? '弧线' : '七段码')
+      + (body.costTimeMs != null ? ' · costTime ' + body.costTimeMs + 'ms' : ' · costTime 自动'), 'ok');
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+});
+
+$('btn-stop').addEventListener('click', async () => {
+  if (!state.currentJobId) return;
+  const btn = $('btn-stop');
+  btn.disabled = true;
+  btn.textContent = '正在中断…';
+  try {
+    // immediate=true → 中断在途请求与等待，不用等本轮跑完
+    const r = await api('/api/jobs/' + state.currentJobId + '/stop', { method: 'POST', body: { immediate: true } });
+    toast(r.message || '已立即结束', 'ok');
+    logLine($('log'), '[已请求立即结束，正在中断在途请求…]', 'l-warn');
+  } catch (err) {
+    toast(err.message, 'err');
+    btn.disabled = false;
+  }
+  btn.textContent = '立即结束';
+});
+
+/** 订阅任务事件流（SSE）+ 轮询兜底。 */
+function attachJobStream(jobId) {
+  stopJobStream();
+
+  const log = $('log');
+  const seenRounds = new Set();   // 已渲染过的轮次号，防止 SSE 与轮询重复
+  state.seenRounds = seenRounds;
+  state.lastEventAt = Date.now();
+  state.lastLoggedAt = 0;
+
+  const es = new EventSource('/api/jobs/' + jobId + '/stream');
+  state.jobStream = es;
+
+  es.onopen = () => {
+    logLine(log, '[连接已建立，等待事件…]', 'l-dim');
+    state.lastEventAt = Date.now();
+  };
+
+  es.onmessage = (ev) => {
+    state.lastEventAt = Date.now();
+    let d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    handleJobEvent(d, log, seenRounds, es);
+  };
+
+  es.onerror = () => {
+    // EventSource 会自动重连；这里只提示一次，不关连接
+    if (!state.streamErrorNotified) {
+      state.streamErrorNotified = true;
+      logLine(log, '[日志流中断，正在自动重连；同时已启用 3 秒轮询兜底]', 'l-warn');
+      // ★★ 2026-10-02：「隧道地址下看不到日志」的可诊断降级。
+      //   以前这里只提示一句「正在重连」，用户完全不知道**为什么**没日志
+      //  （隧道下最常见的是会话 cookie 被中间层丢掉 → 流 401）。
+      //   现在主动探测一次这个 SSE 地址的真实 HTTP 状态并写进日志区，
+      //   用户截一行就能定位问题。
+      probeStreamStatus(jobId, log);
+    }
+    startPollFallback(jobId);
+  };
+
+  // ★ 心跳看门狗：15 秒没收到任何事件就提示一次（服务端每 15s 发 `:ping`）。
+  //   没有这个时，隧道被缓冲/半死连接的表现就是「一直空白、也不报错」。
+  if (state.watchdogTimer) clearInterval(state.watchdogTimer);
+  state.watchdogTimer = setInterval(() => {
+    if (!state.currentJobId) return;
+    const idle = Date.now() - (state.lastEventAt || 0);
+    if (idle > 20000) {
+      logLine(log, `[已 ${Math.round(idle / 1000)} 秒未收到事件流数据，轮询仍在补齐；` +
+        `若长期无日志请检查隧道地址是否仍有效]`, 'l-warn');
+      state.lastEventAt = Date.now();   // 每 20s 最多提示一次
+    }
+  }, 10000);
+
+  // 双保险：3 秒轮询一次任务详情，补齐任何漏掉的轮次
+  startPollFallback(jobId);
+}
+
+/**
+ * 探测 SSE 地址的真实 HTTP 状态（用于隧道下定位「为什么没有日志」）。
+ *
+ * EventSource 的 onerror **拿不到状态码**，所以用 fetch 再打一次同地址：
+ *  - 401/403 → 会话失效（隧道下 cookie 被丢/被改最常见）
+ *  - 200     → 流本身是通的，问题在别处（缓冲/代理）
+ *  - 其它    → 原样报出来
+ * 只读一小段（4KB）就中断，避免把整条流读进来。
+ */
+async function probeStreamStatus(jobId, log) {
+  try {
+    const res = await fetch('/api/jobs/' + jobId + '/stream', { credentials: 'same-origin' });
+    if (res.status === 401 || res.status === 403) {
+      logLine(log, `[日志流被拒绝：HTTP ${res.status}（登录会话失效）。请重新登录后再看日志]`, 'l-fail');
+      return;
+    }
+    if (!res.ok) {
+      logLine(log, `[日志流不可用：HTTP ${res.status}]`, 'l-fail');
+      return;
+    }
+    const ce = res.headers.get('content-encoding') || '(未声明)';
+    logLine(log, `[日志流可达：HTTP 200，content-encoding=${ce}；若仍不刷新多为代理缓冲]`, 'l-dim');
+  } catch (e) {
+    logLine(log, '[日志流不可达：' + (e.message || e) + ']', 'l-fail');
+  }
+}
+
+/** 停止当前任务的事件流与轮询。 */
+function stopJobStream() {
+  if (state.jobStream) { state.jobStream.close(); state.jobStream = null; }
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  if (state.watchdogTimer) { clearInterval(state.watchdogTimer); state.watchdogTimer = null; }
+  state.streamErrorNotified = false;
+  state.lastLoggedAt = 0;
+}
+
+/** 轮询兜底：每 3 秒拉一次任务详情，把没渲染过的轮次补上。 */
+function startPollFallback(jobId) {
+  if (state.pollTimer) return;
+  state.pollTimer = setInterval(async () => {
+    if (!state.currentJobId) return;
+    try {
+      const r = await api('/api/jobs/' + state.currentJobId);
+      state.pollOk = true;
+      const log = $('log');
+      for (const rd of r.rounds || []) {
+        if (state.seenRounds.has(rd.round_no)) continue;
+        state.seenRounds.add(rd.round_no);
+        logLine(log, `（轮询补齐）第 ${rd.round_no} 轮${rd.ok ? '成功' : '失败'}：${rd.message || ''}`,
+          rd.ok ? 'l-ok' : 'l-fail');
+        if (rd.detail) logLine(log, '         ' + String(rd.detail).slice(0, 300), 'l-dim');
+      }
+      if (!(r.job && r.job.status === 'running') && state.pollTimer) {
+        // 任务已结束：收尾
+        finishJobUi(r.job ? r.job.status : '');
+        stopJobStream();
+      }
+    } catch (e) {
+      // ★★ 2026-10-02：以前这里**完全静默**（`/* 轮询失败不打扰用户 */`）——
+      //   于是隧道断掉 / 会话失效时，日志区一条都没有、用户也看不到任何原因。
+      //   现在按错误类型区分：401/403 明确提示重新登录；其它错误每 30 秒提示一次。
+      state.pollOk = false;
+      if (e && (e.status === 401 || e.status === 403)) {
+        if (state.lastLoggedAt !== -1) {
+          state.lastLoggedAt = -1;
+          logLine($('log'), '[轮询失败：登录会话已失效（HTTP ' + e.status + '），请重新登录]', 'l-fail');
+        }
+        return;
+      }
+      const now = Date.now();
+      if (now - (state.lastLoggedAt || 0) > 30000) {
+        state.lastLoggedAt = now;
+        logLine($('log'), '[轮询失败（每 30 秒提示一次）：' + (e.message || e) + ']', 'l-warn');
+      }
+    }
+  }, 3000);
+}
+
+/** 统一处理一条任务事件。 */
+function handleJobEvent(d, log, seenRounds, es) {
+  const t = fmtTime(d.at);
+
+  switch (d.type) {
+    case 'snapshot': {
+      // 连接时服务端发的现状快照：先把已落库的轮次补上，再接实时事件
+      const j = d.job || {};
+      logLine(log, `[快照] 任务 #${j.id} ${statusText(j.status)} · 成功 ${j.roundsDone}/${j.roundsTotal} · 失败 ${j.roundsFailed}`, 'l-dim');
+      const cfg = j.config || {};
+      logLine(log, `[配置] 知识点 ${cfg.pointId} · 画笔 ${cfg.strokeMode === 'SEVEN_SEGMENT' ? '七段码' : '弧线'}` +
+        ` · costTime ${cfg.costTimeMs == null ? '自动' : cfg.costTimeMs + 'ms'}` +
+        ` · 轮间隔 ${cfg.gapMinMs}~${cfg.gapMaxMs}ms` +
+        ` · 答题间隔 ${(cfg.submitDelayMaxMs || 0) > 0 ? (cfg.submitDelayMinMs + '~' + cfg.submitDelayMaxMs + 'ms') : '无'}`, 'l-dim');
+      for (const rd of d.rounds || []) {
+        if (seenRounds.has(rd.round_no)) continue;
+        seenRounds.add(rd.round_no);
+        logLine(log, `第 ${rd.round_no} 轮${rd.ok ? '成功' : '失败'}：${rd.message || ''}`, rd.ok ? 'l-ok' : 'l-fail');
+      }
+      return;
+    }
+    case 'tick':
+      // 心跳：更新最后一行，不刷屏
+      updateTickLine(log, `[${t}] ${d.message}`, 'l-dim');
+      return;
+    case 'gap':
+      logLine(log, `[${t}] ${d.message}`, 'l-warn');
+      return;
+    case 'ok':
+    case 'fail': {
+      if (d.round != null) seenRounds.add(d.round);
+      logLine(log, `[${t}] ${d.message}`, d.type === 'ok' ? 'l-ok' : 'l-fail');
+      if (d.detail) logLine(log, '         ' + String(d.detail).slice(0, 400), 'l-dim');
+      return;
+    }
+    case 'status': {
+      logLine(log, `[${t}] ${d.message}`, d.finished || /完成|已停止|中止/.test(d.message || '') ? 'l-ok' : 'l-dim');
+      if (d.finished || /任务完成|已停止|中止|失败/.test(d.message || '')) {
+        finishJobUi('');
+        if (es) es.close();
+        stopJobStream();
+      }
+      return;
+    }
+    default: {
+      // match / match-ok / encode / encode-ok / submit / rate-limit / warn 等
+      let cls = 'l-dim';
+      if (d.type === 'rate-limit' || d.type === 'warn') cls = 'l-warn';
+      if (d.type === 'match-ok' || d.type === 'encode-ok') cls = 'l-ok';
+      logLine(log, `[${t}] ${d.message || ''}`, cls);
+    }
+  }
+}
+
+/** 原地更新最后一条「心跳」行，避免 5 秒一条把日志刷满。 */
+function updateTickLine(log, text, cls) {
+  const last = log.lastElementChild;
+  if (last && last.dataset && last.dataset.tick === '1') {
+    last.textContent = text;
+  } else {
+    const div = logLine(log, text, cls);
+    div.dataset.tick = '1';
+  }
+  // 原地更新心跳行也要遵守「跟随中才平滑滚到底」语义（避免上滑后被强制滚动）。
+  ensureAutoFollow(log);
+  if (log.dataset.autoFollow === '1') smoothScrollToBottom(log);
+}
+
+/** 任务收尾：恢复按钮状态（并行模式下开始按钮一直是可用的）。 */
+function finishJobUi(status) {
+  $('btn-stop').disabled = true;
+  $('btn-stop').textContent = '立即结束';
+  if (status === 'done') $('job-badge').className = 'badge ok';
+  else if (status === 'failed') $('job-badge').className = 'badge fail';
+  loadJobs();
+}
+
+/* ---------------------------- 任务页 ---------------------------- */
+
+/** 用户任务页里当前被勾选的任务 id（批量停止 / 继续用）。 */
+const jobSel = new Set();
+/** 最近一次渲染的任务列表快照（全选 / 反选用）。 */
+let jobsSnapshot = [];
+
+async function loadJobs() {
+  try {
+    const r = await api('/api/jobs');
+    jobsSnapshot = r.jobs || [];
+    const box = $('jobs-list');
+    box.innerHTML = '';
+    if (r.jobs.length === 0) {
+      box.innerHTML = '<p class="muted small">暂无任务</p>';
+      updateJobSelCount();
+      return;
+    }
+    for (const j of r.jobs) {
+      const el = document.createElement('div');
+      el.className = 'item stack';
+      el.innerHTML = '<div class="main"><div class="title"></div><div class="meta"></div><div class="cfg"></div></div>' +
+        '<div class="actions"></div>';
+      // 勾选框（批量停止 / 继续用）
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'pick';
+      cb.checked = jobSel.has(j.id);
+      cb.addEventListener('change', () => {
+        if (cb.checked) jobSel.add(j.id); else jobSel.delete(j.id);
+        updateJobSelCount();
+      });
+      el.querySelector('.title').textContent =
+        '#' + j.id + ' [' + kindText(j) + '] ' + statusText(j.status);
+      el.querySelector('.meta').textContent =
+        '成功 ' + j.roundsDone + '/' + j.roundsTotal + ' · 失败 ' + j.roundsFailed +
+        (j.leoName ? ' · ' + j.leoName : '') + ' · ' + fmtTime(j.createdAt);
+      // 完整配置（含画笔 / 间隔 / 耗时等）
+      el.querySelector('.cfg').textContent = jobConfigText(j);
+      const actions = el.querySelector('.actions');
+      if (isActiveJob(j)) {
+        actions.appendChild(makeMiniButton('暂停', async () => {
+          await jobAction(j.id, 'pause');
+          await loadJobs();
+        }));
+        actions.appendChild(makeMiniButton('停止', async () => {
+          await jobAction(j.id, 'stop');
+          await loadJobs();
+        }, 'danger'));
+      }
+      if ((j.status === 'paused' || j.status === 'stopped') && j.roundsDone < j.roundsTotal) {
+        actions.appendChild(makeMiniButton('继续', async () => {
+          await jobAction(j.id, 'resume');
+          await loadJobs();
+        }));
+      }
+      actions.appendChild(makeMiniButton('明细', () => showJobDetail(j.id)));
+      el.prepend(cb);
+      box.appendChild(el);
+    }
+    updateJobSelCount();
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+/** 更新「已选 N 个」提示。 */
+function updateJobSelCount() {
+  const el = $('jobs-sel-count');
+  if (el) el.textContent = '已选 ' + jobSel.size + ' 个';
+}
+
+/** 全选当前列表里的任务。 */
+function selectAllJobs() {
+  for (const j of jobsSnapshot) jobSel.add(j.id);
+  loadJobs();
+}
+/** 反选：已选→取消，未选→选中。 */
+function invertJobsSelection() {
+  for (const j of jobsSnapshot) {
+    if (jobSel.has(j.id)) jobSel.delete(j.id); else jobSel.add(j.id);
+  }
+  loadJobs();
+}
+
+function statusText(s) {
+  return {
+    queued: '排队中', running: '运行中', done: '已完成',
+    failed: '失败', stopped: '已停止', paused: '已暂停',
+  }[s] || s;
+}
+
+/** 造一个列表里的小按钮。 */
+function makeMiniButton(label, onClick, extraClass) {
+  const b = document.createElement('button');
+  b.className = 'mini' + (extraClass ? ' ' + extraClass : '');
+  b.textContent = label;
+  b.addEventListener('click', () => { onClick().catch((e) => toast(e.message, 'err')); });
+  return b;
+}
+
+/**
+ * 对**自己的**任务执行 pause / resume / stop。
+ *
+ * 接口本身也做了归属校验（服务端不会让你碰别人的任务），这里只是前端入口。
+ */
+async function jobAction(id, action) {
+  const path = '/api/jobs/' + id + '/' + action;
+  const r = await api(path, { method: 'POST', body: {} });
+  toast(r.message || ('已' + ({ pause: '暂停', resume: '继续', stop: '停止' }[action] || action)), 'ok');
+  return r;
+}
+
+/** 任务是不是「还没结束」（管理页筛选 / 按钮可用性都用它）。 */
+function isActiveJob(j) {
+  return j.status === 'running' || j.status === 'queued' || j.status === 'paused';
+}
+
+function kindText(j) {
+  if (j.kind === 'exercise') return '刷练习';
+  if (j.kind === 'race') return '竞速';
+  return '刷局';
+}
+/**
+ * 把任务的完整参数拼成人能读的一段文字（刷局 / 刷练习 / 竞速字段不同，分三路拼）。
+ */
+function jobConfigText(j) {
+  const c = j.config || {};
+  const head = [
+    '任务类型：' + kindText(j),
+    '轮次：' + (j.roundsDone || 0) + '/' + (j.roundsTotal || 0) + '（失败 ' + (j.roundsFailed || 0) + '）',
+  ];
+  if (j.kind === 'race') {
+    head.push(
+      '知识点 ID：' + (c.pointId || '自动（第一个）'),
+      '题数：' + (c.questionCount ? c.questionCount + ' 题' : '默认'),
+      '提交时间：' + (c.answerDelayMinMs || 0) + '~' + (c.answerDelayMaxMs || 0) + 'ms',
+      '答案来源：' + (c.useSample === false ? '本地计算优先' : '抄 sample'),
+      '局间间隔：' + (c.gapMinMs || 0) + '~' + (c.gapMaxMs || 0) + 'ms',
+    );
+  } else if (j.kind === 'exercise') {
+    head.push(
+      '知识点 ID：' + c.keypointId,
+      '每轮题数：' + c.limit,
+      '每轮间隔：' + (c.gapMinMs || 0) + '~' + (c.gapMaxMs || 0) + 'ms',
+    );
+    if (c.costTimePerQuestionMs != null) head.push('每题耗时：' + c.costTimePerQuestionMs + 'ms');
+  } else {
+    head.push(
+      '知识点 ID：' + c.pointId,
+      '画笔算法：' + (c.strokeMode === 'SEVEN_SEGMENT' ? '七段码' : '弧线'),
+      'costTime：' + (c.costTimeMs == null ? '自动' : c.costTimeMs + 'ms'),
+      '每轮间隔：' + (c.gapMinMs == null ? '?' : c.gapMinMs) + '~' + (c.gapMaxMs == null ? '?' : c.gapMaxMs) + 'ms',
+      '答题间隔：' + ((c.submitDelayMaxMs || 0) > 0 ? (c.submitDelayMinMs + '~' + c.submitDelayMaxMs + 'ms') : '无'),
+      '频控退避：' + (c.rateLimitBaseMs == null ? '?' : c.rateLimitBaseMs) + 'ms × ' + (c.rateLimitMaxWait == null ? '?' : c.rateLimitMaxWait),
+      '出题重试：' + (c.matchRetryIntervalMs == null ? '?' : c.matchRetryIntervalMs) + 'ms / 上限 ' + (c.matchRetryMaxMs == null ? '?' : c.matchRetryMaxMs) + 'ms',
+    );
+    if (c.subUserId != null) head.push('子账号：' + c.subUserId);
+  }
+  if (j.subUserId != null && j.kind !== 'exercise') head.push('（库内 sub_user_id：' + j.subUserId + '）');
+  if (j.error) head.push('错误：' + j.error);
+  return head.join('\n');
+}
+
+async function showJobDetail(id) {
+  try {
+    const r = await api('/api/jobs/' + id);
+    const box = $('job-detail');
+    box.innerHTML = '';
+    logLine(box, '任务 #' + r.job.id + ' ' + statusText(r.job.status) + '  成功 ' + r.job.roundsDone + ' 失败 ' + r.job.roundsFailed, 'l-dim');
+    for (const rd of r.rounds) {
+      logLine(box,
+        '#' + rd.round_no + ' ' + (rd.ok ? 'OK' : 'FAIL') + ' HTTP ' + (rd.http_code == null ? '-' : rd.http_code) + '  ' + (rd.message || ''),
+        rd.ok ? 'l-ok' : 'l-fail');
+      if (rd.detail) logLine(box, '    ' + String(rd.detail).slice(0, 300), 'l-dim');
+    }
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+$('btn-refresh-jobs').addEventListener('click', loadJobs);
+$('jobs-sel-all').addEventListener('click', selectAllJobs);
+$('jobs-sel-invert').addEventListener('click', invertJobsSelection);
+$('jobs-sel-none').addEventListener('click', () => { jobSel.clear(); loadJobs(); });
+$('jobs-batch-stop').addEventListener('click', async () => {
+  const ids = Array.from(jobSel);
+  if (!ids.length) return toast('请先勾选任务', 'err');
+  if (!confirm('确定停止选中的 ' + ids.length + ' 个任务？')) return;
+  for (const id of ids) { try { await jobAction(id, 'stop'); } catch (e) { /* 单个失败不影响其余 */ } }
+  toast('已停止 ' + ids.length + ' 个任务', 'ok');
+  jobSel.clear();
+  await loadJobs();
+});
+$('jobs-batch-resume').addEventListener('click', async () => {
+  const ids = Array.from(jobSel);
+  if (!ids.length) return toast('请先勾选任务', 'err');
+  for (const id of ids) { try { await jobAction(id, 'resume'); } catch (e) { /* 单个失败不影响其余 */ } }
+  toast('已启动/继续 ' + ids.length + ' 个任务', 'ok');
+  await loadJobs();
+});
+
+/* ---- 刷练习页按钮 ---- */
+$('prac-refresh').addEventListener('click', refreshPractice);
+$('prac-pump').addEventListener('click', pumpPractice);
+$('prac-exam').addEventListener('click', fetchPracticeExam);
+$('prac-run').addEventListener('click', runPractice);
+$('prac-stop').addEventListener('click', stopPractice);
+
+/* ---- 比赛竞速（开学季） ---- */
+$('race-home').addEventListener('click', loadRaceHome);
+$('race-rank-load').addEventListener('click', loadRaceRank);
+$('race-run').addEventListener('click', runRace);
+$('race-stop').addEventListener('click', stopRace);
+$('race-leo').addEventListener('change', loadRaceSubs);
+$('race-switch').addEventListener('click', switchRaceSub);
+$('race-presets').addEventListener('click', () => {
+  // 「填入推荐值」：贴限模式（抢榜首选 —— 自动贴榜一下限）+ 10 局
+  const vals = {
+    'race-aimsafety': '40', 'race-qcount': '0', 'race-rounds': '10',
+    'race-gapmin': '800', 'race-gapmax': '1500', 'race-battlemax': '300000',
+  };
+  for (const [id, v] of Object.entries(vals)) $(id).value = v;
+  $('race-aim').checked = true;
+  // 触发持久化（与 bindPersist 的 change 监听配合）
+  for (const id of [...Object.keys(vals), 'race-aim']) {
+    try { $(id).dispatchEvent(new Event('change')); } catch (e) { /* ignore */ }
+  }
+  toast('已填入推荐值：贴限模式（自动贴榜一抢名次）+ 10 局 + 局间 0.8~1.5s', 'ok');
+});
+
+/**
+ * 「填入推荐值」：把刷局节奏一键填成惯用配置（每轮 0、答题 8~12s、
+ * 出题重试 10s / 最长等 2 分钟、退避 10s×2）。
+ *
+ * 因 bindPersist 会把输入框值存进 localStorage，所以这个按钮本质是给
+ * 旧版默认下进站的浏览器一个一键迁移的入口 —— 新用户首屏直接看到这套。
+ */
+const GRIND_RECOMMENDED = {
+  'grind-gapmin': 0,
+  'grind-gapmax': 0,
+  'grind-mretry': 10000,
+  'grind-mmax': 120000,
+  'grind-delaymin': 8000,
+  'grind-delaymax': 12000,
+  'grind-rlbase': 10000,
+  'grind-rlmax': 2,
+};
+$('grind-gap-recommend').addEventListener('click', () => {
+  const els = [];
+  for (const [id, v] of Object.entries(GRIND_RECOMMENDED)) {
+    const el = $(id);
+    if (!el) continue;
+    el.value = String(v);
+    els.push(el);
+  }
+  // 触发 bindPersist 的 change 监听，把新值落进 localStorage
+  els.forEach((el) => {
+    try { el.dispatchEvent(new Event('change')); } catch (e) { /* ignore */ }
+  });
+  toast('已填入推荐值：每轮 0、答题 8~12s、出题重试 10s/最长 2 分钟、退避 10s×2', 'ok');
+});
+$('prac-leo').addEventListener('change', loadPracticeSubs);
+$('prac-switch').addEventListener('click', switchPracticeSub);
+$('dc-add').addEventListener('click', addDeviceChain);
+$('dc-list').addEventListener('click', onDeviceChainListClick);
+
+/* ---------------------------- 穿透页 ---------------------------- */
+
+async function loadTunnel() {
+  try {
+    const r = await api('/api/tunnel');
+    const t = r.tunnel;
+    $('tunnel-url').textContent = t.url || '（未启动）';
+    const box = $('tunnel-logs');
+    box.innerHTML = '';
+    for (const l of t.logs) logLine(box, l, 'l-dim');
+    if (!t.available) logLine(box, '未检测到 cloudflared，点「启动穿透」会给出下载命令', 'l-warn');
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+$('btn-tunnel-start').addEventListener('click', async () => {
+  toast('正在启动隧道（最多等 20 秒）…', 'ok');
+  try {
+    const r = await api('/api/tunnel', { method: 'POST', body: {} });
+    if (r.ok) {
+      $('tunnel-url').textContent = r.url;
+      toast('穿透地址：' + r.url, 'ok');
+    } else {
+      toast('启动失败：' + (r.message || ''), 'err');
+    }
+    await loadTunnel();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+$('btn-tunnel-stop').addEventListener('click', async () => {
+  try {
+    await api('/api/tunnel', { method: 'POST', body: { action: 'stop' } });
+    toast('已停止', 'ok');
+    await loadTunnel();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* ---------------------------- 管理页 ---------------------------- */
+
+async function loadAdmin() {
+  if (!state.user || state.user.role !== 'admin') return;
+  try {
+    const [users, jobs, audit, sys] = await Promise.all([
+      api('/api/admin/users'),
+      api('/api/admin/jobs'),
+      api('/api/admin/audit'),
+      api('/api/system'),
+    ]);
+
+    const ub = $('admin-users');
+    ub.innerHTML = '';
+    for (const u of users.users) {
+      const el = document.createElement('div');
+      el.className = 'item stack';
+      el.innerHTML = '<div class="main"><div class="title"></div><div class="meta"></div></div><div class="actions"></div>';
+      el.querySelector('.title').textContent = u.username + (u.role === 'admin' ? '（管理员）' : '');
+      el.querySelector('.meta').textContent =
+        '最后登录 ' + fmtTime(u.last_login_at) + (u.disabled ? ' · 已禁用' : '') +
+        ' · 小猿账号 ' + (u.leoAccounts == null ? '?' : u.leoAccounts) + ' 个' +
+        ' · 进行中任务 ' + (u.activeJobs == null ? '?' : u.activeJobs) + ' 个' +
+        ' · 可刷上限 ' + ((u.round_limit == null || u.round_limit === 0) ? '不限' : u.round_limit + ' 局');
+      el.querySelector('.actions').append(
+        makeMiniButton('重置密码', async () => {
+          const np = prompt('输入新密码（≥6 位）');
+          if (!np) return;
+          await api('/api/admin/users/' + u.id + '/password', { method: 'POST', body: { password: np } });
+          toast('已重置', 'ok');
+        }),
+        makeMiniButton('刷局上限', async () => {
+          const cur = (u.round_limit == null || u.round_limit === 0) ? '' : String(u.round_limit);
+          const v = prompt('设置「' + u.username + '」每次任务可刷的局数上限（0 或留空 = 不限制）：', cur);
+          if (v == null) return;
+          try {
+            const r = await api('/api/admin/users/' + u.id + '/round-limit', { method: 'POST', body: { limit: v } });
+            toast(r.message || '已设置', 'ok');
+            await loadAdmin();
+          } catch (err) { toast(err.message, 'err'); }
+        }),
+        makeMiniButton('强制下线', async () => {
+          if (!confirm('强制「' + u.username + '」所有设备下线？该账号所有登录会话立即失效。')) return;
+          try {
+            const r = await api('/api/admin/users/' + u.id + '/kick', { method: 'POST', body: {} });
+            toast(r.message || '已下线', 'ok');
+            await loadAdmin(); await loadAdminSessions();
+          } catch (err) { toast(err.message, 'err'); }
+        }),
+        makeMiniButton(u.disabled ? '启用' : '禁用', async () => {
+          const r = await api('/api/admin/users/' + u.id + '/disable', {
+            method: 'POST', body: { disabled: !u.disabled },
+          });
+          toast(r.message || '已更新', 'ok');
+          await loadAdmin();
+        }),
+        // 删除账号（原先只能禁用）
+        makeMiniButton('删除', async () => {
+          const tip = u.id === state.user.id
+            ? '不能删除自己。'
+            : `确定删除账号「${u.username}」？\n\n` +
+              `· 名下 ${u.leoAccounts || 0} 个小猿账号（登录态）将被清除\n` +
+              `· 历史任务与逐轮明细将被清除\n` +
+              `· 进行中的任务会先被停止\n` +
+              `· 该账号所有登录会话立即失效\n\n` +
+              `此操作不可恢复。`;
+          if (u.id === state.user.id) return toast('不能删除自己', 'err');
+          if (!confirm(tip)) return;
+          const r = await api('/api/admin/users/' + u.id, { method: 'DELETE' });
+          toast(r.message || '已删除', 'ok');
+          adminJobSel.delete(u.id);
+          await loadAdmin();
+        }, 'danger'),
+      );
+      ub.appendChild(el);
+    }
+
+    renderAdminJobs(jobs.jobs || [], new Set(jobs.running || []));
+
+    const ab = $('admin-audit');
+    ab.innerHTML = '';
+    for (const a of audit.audit) {
+      logLine(ab, '[' + fmtTime(a.created_at) + '] ' + (a.action || '') + ' ' + (a.detail || '') + ' ' + (a.ip || ''), 'l-dim');
+    }
+
+    const sb = $('sys-info');
+    sb.innerHTML = '';
+    logLine(sb, '端口 ' + sys.config.port + ' · 数据库 ' + sys.config.dbFile, 'l-dim');
+    logLine(sb, 'native：' + (sys.native.ok ? 'OK（样例 sign ' + sys.native.sample + '）' : '失败 → ' + sys.native.detail), sys.native.ok ? 'l-ok' : 'l-fail');
+    logLine(sb, 'sign 公式自校验：' + (sys.signFixture.ok ? 'OK' : '失败'), sys.signFixture.ok ? 'l-ok' : 'l-fail');
+    logLine(sb, '任务：' + (sys.jobs.busy ? '运行中 ' + JSON.stringify(sys.jobs.running) : '空闲'), 'l-dim');
+    logLine(sb, '频控退避：基数 ' + sys.pk.rateLimitBaseMs + 'ms · 最多 ' + sys.pk.rateLimitMaxWait + ' 次', 'l-dim');
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+/* --------------------- 管理页：全部任务（可操控） --------------------- */
+// 管理页任务：归属用户 + 小猿账号 + 类型 + 完整配置，支持暂停/继续/停止/明细 + 批量勾选。
+
+/** 管理页里被勾选的任务 id。 */
+const adminJobSel = new Set();
+/** 管理页「明细」挂着的实时日志流（切任务时要关掉上一条）。 */
+let adminJobStream = null;
+
+function renderAdminJobs(jobs, runningSet) {
+  const box = $('admin-jobs');
+  box.innerHTML = '';
+  const onlyActive = $('admin-jobs-only-active') && $('admin-jobs-only-active').checked;
+  let shown = 0;
+  for (const j of jobs) {
+    if (onlyActive && !isActiveJob(j)) continue;
+    shown++;
+
+    const el = document.createElement('div');
+    el.className = 'item stack';
+
+    // 勾选框（批量操作用）
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'pick';
+    cb.checked = adminJobSel.has(j.id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) adminJobSel.add(j.id); else adminJobSel.delete(j.id);
+      updateAdminJobCount();
+    });
+
+    const main = document.createElement('div');
+    main.className = 'main';
+    main.innerHTML = '<div class="title"></div><div class="meta"></div><div class="cfg"></div>';
+    const live = runningSet && runningSet.has(j.id) ? ' · 内存中运行中' : '';
+    main.querySelector('.title').textContent =
+      '#' + j.id + '  ' + (j.username || '(已删除用户)') + '  [' + kindText(j) + ']  ' + statusText(j.status) + live;
+    main.querySelector('.meta').textContent =
+      '小猿账号：' + (j.leoName || ('#' + j.leoAccountId)) +
+      ' · 进度 ' + (j.roundsDone || 0) + '/' + (j.roundsTotal || 0) +
+      ' · 失败 ' + (j.roundsFailed || 0) +
+      ' · 创建 ' + fmtTime(j.createdAt) +
+      (j.finishedAt ? ' · 结束 ' + fmtTime(j.finishedAt) : '');
+    main.querySelector('.cfg').textContent = jobConfigText(j);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    // 暂停 / 停止：只对没结束的任务有意义
+    if (isActiveJob(j)) {
+      actions.appendChild(makeMiniButton('暂停', async () => {
+        await adminJobAction([j.id], 'pause');
+        await loadAdminJobsOnly();
+      }));
+      actions.appendChild(makeMiniButton('停止', async () => {
+        if (!confirm(`确定停止任务 #${j.id}（${j.username || '?'} 的${kindText(j)}）？`)) return;
+        await adminJobAction([j.id], 'stop');
+        await loadAdminJobsOnly();
+      }, 'danger'));
+    }
+    // 继续：暂停/停止且还有剩余轮次
+    if ((j.status === 'paused' || j.status === 'stopped') && (j.roundsDone || 0) < (j.roundsTotal || 0)) {
+      actions.appendChild(makeMiniButton('继续', async () => {
+        await adminJobAction([j.id], 'resume');
+        await loadAdminJobsOnly();
+      }));
+    }
+    actions.appendChild(makeMiniButton('明细', () => showAdminJobDetail(j.id)));
+    actions.appendChild(makeMiniButton('删除', async () => {
+      if (!confirm(`确定删除任务 #${j.id}？\n轮次明细一并删除，不可恢复！`)) return;
+      await adminJobAction([j.id], 'delete');
+      adminJobSel.delete(j.id);
+      await loadAdminJobsOnly();
+    }, 'danger'));
+
+    el.append(cb, main, actions);
+    box.appendChild(el);
+  }
+  if (shown === 0) {
+    box.innerHTML = '<p class="muted small">' + (jobs.length ? '（当前筛选下没有任务）' : '暂无任务') + '</p>';
+  }
+  updateAdminJobCount();
+}
+
+/** 更新「已选 N 个」提示。 */
+function updateAdminJobCount() {
+  const el = $('admin-jobs-count');
+  if (el) el.textContent = '已选 ' + adminJobSel.size + ' 个任务';
+}
+
+/** 只刷新任务列表（用户/审计不动，避免整页重绘丢勾选）。 */
+async function loadAdminJobsOnly() {
+  try {
+    const r = await api('/api/admin/jobs');
+    renderAdminJobs(r.jobs || [], new Set(r.running || []));
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+/** 管理页批量操作：stop / pause / resume / delete。 */
+async function adminJobAction(ids, action) {
+  if (!ids.length) return toast('请先勾选任务', 'err');
+  const r = await api('/api/admin/jobs/action', { method: 'POST', body: { ids: ids, action: action } });
+  if (r.failed) {
+    // 部分失败时把每条的原因讲清楚，别只说「失败」
+    const bad = (r.results || []).filter((x) => !x.ok).map((x) => '#' + x.id + '：' + (x.message || '失败'));
+    toast(r.message + '｜' + bad.join('；'), 'err');
+  } else {
+    toast(r.message, 'ok');
+  }
+  return r;
+}
+
+/**
+ * 管理页「明细」：先打配置头，再把已落库的逐轮日志列出来，
+ * 最后挂上该任务的实时事件流（服务端已对管理员放行 /api/jobs/:id/stream）。
+ */
+async function showAdminJobDetail(id) {
+  const box = $('admin-job-detail');
+  box.innerHTML = '';
+  if (adminJobStream) { adminJobStream.close(); adminJobStream = null; }
+  try {
+    const r = await api('/api/admin/jobs/' + id);
+    const j = r.job;
+    logLine(box, `任务 #${j.id}  ${j.username || '(已删除用户)'}  [${kindText(j)}]  ${statusText(j.status)}`, 'l-dim');
+    logLine(box, '小猿账号：' + (j.leoName || ('#' + j.leoAccountId)) +
+      ' · 进度 ' + (j.roundsDone || 0) + '/' + (j.roundsTotal || 0) + ' · 失败 ' + (j.roundsFailed || 0), 'l-dim');
+    logLine(box, jobConfigText(j), 'l-dim');
+    logLine(box, '—— 逐轮明细 ——', 'l-dim');
+    for (const rd of r.rounds || []) {
+      logLine(box, '#' + rd.round_no + ' ' + (rd.ok ? 'OK' : 'FAIL') +
+        ' HTTP ' + (rd.http_code == null ? '-' : rd.http_code) + '  ' + (rd.message || ''),
+      rd.ok ? 'l-ok' : 'l-fail');
+      if (rd.detail) logLine(box, '    ' + String(rd.detail).slice(0, 300), 'l-dim');
+    }
+    logLine(box, '—— 实时日志 ——', 'l-dim');
+
+    const seen = new Set((r.rounds || []).map((x) => x.round_no));
+    const es = new EventSource('/api/jobs/' + id + '/stream');
+    adminJobStream = es;
+    es.onmessage = (ev) => {
+      let d;
+      try { d = JSON.parse(ev.data); } catch (e) { return; }
+      renderAdminJobEvent(d, box, seen);
+    };
+    es.onerror = () => { /* EventSource 自动重连 */ };
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+/** 管理页实时日志渲染（不碰「刷局」页的按钮状态，所以不复用 handleJobEvent）。 */
+function renderAdminJobEvent(d, box, seen) {
+  const t = fmtTime(d.at);
+  if (d.type === 'snapshot') {
+    for (const rd of d.rounds || []) {
+      if (seen.has(rd.round_no)) continue;
+      seen.add(rd.round_no);
+      logLine(box, `第 ${rd.round_no} 轮${rd.ok ? '成功' : '失败'}：${rd.message || ''}`, rd.ok ? 'l-ok' : 'l-fail');
+    }
+    return;
+  }
+  if (d.type === 'tick') { updateTickLine(box, `[${t}] ${d.message}`, 'l-dim'); return; }
+  let cls = 'l-dim';
+  if (d.type === 'ok' || d.type === 'match-ok' || d.type === 'encode-ok') cls = 'l-ok';
+  else if (d.type === 'fail') cls = 'l-fail';
+  else if (d.type === 'rate-limit' || d.type === 'warn' || d.type === 'gap') cls = 'l-warn';
+  if (d.type === 'ok' || d.type === 'fail') {
+    if (d.round != null) seen.add(d.round);
+    logLine(box, `[${t}] ${d.message || ''}`, cls);
+    if (d.detail) logLine(box, '    ' + String(d.detail).slice(0, 300), 'l-dim');
+  } else {
+    logLine(box, `[${t}] ${d.message || d.type}`, cls);
+  }
+  if (d.finished) loadAdminJobsOnly();
+}
+
+$('admin-jobs-refresh').addEventListener('click', loadAdminJobsOnly);
+$('admin-leo-refresh').addEventListener('click', loadAdminLeo);
+
+/* --------------- 管理端：在线设备（所有用户） --------------- */
+
+async function loadAdminSessions() {
+  const box = $('admin-sessions');
+  if (!box) return;
+  if (!state.user || state.user.role !== 'admin') return;
+  try {
+    const r = await api('/api/admin/sessions');
+    box.innerHTML = '';
+    const list = r.sessions || [];
+    const cnt = $('admin-sessions-count');
+    if (cnt) cnt.textContent = '共 ' + list.length + ' 个在线会话';
+    if (!list.length) { box.innerHTML = '<p class="muted small">当前没有在线设备</p>'; return; }
+    // 按用户分组：一个用户可能同时有多台设备/多个 IP
+    const groups = new Map();
+    for (const s of list) {
+      const k = String(s.userId);
+      if (!groups.has(k)) groups.set(k, { username: s.username, items: [] });
+      groups.get(k).items.push(s);
+    }
+    for (const [, g] of groups) {
+      const head = document.createElement('div');
+      head.className = 'admin-leo-group-head';
+      head.textContent = g.username + ' · 在线 ' + g.items.length + ' 台';
+      box.appendChild(head);
+      for (const s of g.items) {
+        const el = document.createElement('div');
+        el.className = 'item';
+        el.innerHTML = '<div class="main"><div class="title"></div><div class="meta"></div></div><div class="actions"></div>';
+        el.querySelector('.title').textContent = s.device || '未知设备';
+        el.querySelector('.meta').textContent =
+          'IP ' + (s.ip || '未知') + (s.geoText ? '（' + s.geoText + '）' : '') +
+          ' · 最近活跃 ' + fmtTime(s.lastSeen);
+        const actions = el.querySelector('.actions');
+        actions.appendChild(makeMiniButton('踢出设备', async () => {
+          if (!confirm('让「' + s.username + '」的这台设备（' + s.ip + '）下线？')) return;
+          try {
+            const r2 = await api('/api/admin/users/' + s.userId + '/kick', { method: 'POST', body: { ip: s.ip } });
+            toast(r2.message || '已下线', 'ok');
+            await loadAdminSessions();
+          } catch (err) { toast(err.message, 'err'); }
+        }, 'danger'));
+        actions.appendChild(makeMiniButton('该用户全部下线', async () => {
+          if (!confirm('强制「' + s.username + '」所有设备下线？')) return;
+          try {
+            const r2 = await api('/api/admin/users/' + s.userId + '/kick', { method: 'POST', body: {} });
+            toast(r2.message || '已下线', 'ok');
+            await loadAdminSessions();
+          } catch (err) { toast(err.message, 'err'); }
+        }, 'danger'));
+        box.appendChild(el);
+      }
+    }
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+$('admin-sessions-refresh').addEventListener('click', loadAdminSessions);
+
+/** 管理页：加载「所有用户」的小猿账号（含 CK），回填 #admin-leo。仅管理员可调用后端接口。 */
+async function loadAdminLeo() {
+  const box = $('admin-leo');
+  if (!box) return;
+  if (!state.user || state.user.role !== 'admin') return;
+  try {
+    const r = await api('/api/admin/leo-accounts');
+    box.innerHTML = '';
+    const accs = r.accounts || [];
+    if (accs.length === 0) {
+      box.innerHTML = '<p class="muted small">还没有任何小猿账号。</p>';
+      return;
+    }
+    // 按「注册账号（ownerUserId）」分组：每个注册用户 → 旗下所有小猿账号
+    const groups = new Map();
+    for (const a of accs) {
+      const key = a.ownerUserId != null ? String(a.ownerUserId) : '?';
+      if (!groups.has(key)) groups.set(key, { username: a.ownerUsername || '(未知)', items: [] });
+      groups.get(key).items.push(a);
+    }
+    for (const [key, g] of groups) {
+      const grp = document.createElement('div');
+      grp.className = 'admin-leo-group';
+      const head = document.createElement('div');
+      head.className = 'admin-leo-group-head';
+      head.textContent = '注册账号 ' + g.username + ' · 旗下 ' + g.items.length + ' 个小猿账号';
+      grp.appendChild(head);
+      for (const a of g.items) {
+        const el = document.createElement('div');
+        el.className = 'item';
+        const subs = a.subAccounts || [];
+        el.innerHTML =
+          '<div><div class="title"></div><div class="meta"></div></div>' +
+          '<div class="actions">' +
+          '<button class="mini" data-act="subs">子账号</button>' +
+          '<button class="mini" data-act="ck">显示 CK</button>' +
+          '</div>' +
+          '<div class="ck-box hidden"><code class="ck-text"></code> <button class="mini" data-act="copyck">复制 CK</button></div>' +
+          '<div class="subs-box hidden"></div>';
+        el.querySelector('.title').textContent = a.name + '（uid ' + (a.yfdU || '?') + '）';
+        const ks = (a.cookieNames || []).filter((n) => n.indexOf('ks_') === 0);
+        el.querySelector('.meta').textContent =
+          '手机号 ' + (a.phoneMasked || '未绑定') +
+          ' · 年级 ' + (a.grade == null ? '?' : a.grade) +
+          ' · cookie ' + (a.cookieNames || []).length + ' 条' +
+          ' · 子账号 ' + subs.length + ' 个' +
+          (ks.length ? ' · 设备链 ✓(' + ks.length + ')' : ' · 设备链 ✗') +
+          ' · 绑定链#' + (a.deviceChainId == null ? '自动' : a.deviceChainId);
+        const subsBox2 = el.querySelector('.subs-box');
+        if (subs.length) {
+          const sb2 = document.createElement('div');
+          sb2.className = 'subs-list';
+          for (const s of subs) {
+            const row = document.createElement('div');
+            row.className = 'sub-row';
+            row.textContent = (s.isPrimary ? '★ ' : '· ') + (s.nickname || '(无名)') +
+              ' · 年级 ' + (s.grade == null ? '?' : s.grade) + ' · uid ' + s.userId;
+            sb2.appendChild(row);
+          }
+          subsBox2.appendChild(sb2);
+        } else {
+          subsBox2.innerHTML = '<span class="muted small">（该账号没有子账号）</span>';
+        }
+        el.querySelector('[data-act="subs"]').addEventListener('click', (e) => {
+          if (subsBox2.classList.contains('hidden')) {
+            subsBox2.classList.remove('hidden');
+            e.target.textContent = '收起子账号';
+          } else {
+            subsBox2.classList.add('hidden');
+            e.target.textContent = '子账号';
+          }
+        });
+        const ckBox = el.querySelector('.ck-box');
+        const ckText = el.querySelector('.ck-text');
+        el.querySelector('[data-act="ck"]').addEventListener('click', (e) => {
+          if (ckBox.classList.contains('hidden')) {
+            ckText.textContent = a.cookieHeader || '(无 cookie)';
+            ckBox.classList.remove('hidden');
+            e.target.textContent = '隐藏 CK';
+          } else {
+            ckBox.classList.add('hidden');
+            e.target.textContent = '显示 CK';
+          }
+        });
+        el.querySelector('[data-act="copyck"]').addEventListener('click', async () => {
+          try { await navigator.clipboard.writeText(a.cookieHeader || ''); toast('已复制 CK', 'ok'); }
+          catch { toast('复制失败，请手动选择', 'err'); }
+        });
+        grp.appendChild(el);
+      }
+      box.appendChild(grp);
+    }
+  } catch (err) {
+    box.innerHTML = '<p class="err small">' + (err.message || '加载失败') + '</p>';
+  }
+}
+$('admin-jobs-only-active').addEventListener('change', loadAdminJobsOnly);
+$('admin-jobs-sel-none').addEventListener('click', () => { adminJobSel.clear(); loadAdminJobsOnly(); });
+$('admin-jobs-sel-all').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/admin/jobs');
+    adminJobSel.clear();
+    for (const j of r.jobs || []) adminJobSel.add(j.id);
+    renderAdminJobs(r.jobs || [], new Set(r.running || []));
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('admin-jobs-sel-invert').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/admin/jobs');
+    for (const j of r.jobs || []) {
+      if (adminJobSel.has(j.id)) adminJobSel.delete(j.id); else adminJobSel.add(j.id);
+    }
+    renderAdminJobs(r.jobs || [], new Set(r.running || []));
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('admin-jobs-sel-active').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/admin/jobs');
+    adminJobSel.clear();
+    for (const j of r.jobs || []) if (isActiveJob(j)) adminJobSel.add(j.id);
+    renderAdminJobs(r.jobs || [], new Set(r.running || []));
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('admin-jobs-pause').addEventListener('click', async () => {
+  await adminJobAction(Array.from(adminJobSel), 'pause');
+  await loadAdminJobsOnly();
+});
+$('admin-jobs-resume').addEventListener('click', async () => {
+  await adminJobAction(Array.from(adminJobSel), 'resume');
+  await loadAdminJobsOnly();
+});
+$('admin-jobs-stop').addEventListener('click', async () => {
+  const ids = Array.from(adminJobSel);
+  if (!ids.length) return toast('请先勾选任务', 'err');
+  if (!confirm(`确定停止选中的 ${ids.length} 个任务？`)) return;
+  await adminJobAction(ids, 'stop');
+  await loadAdminJobsOnly();
+});
+$('admin-jobs-delete').addEventListener('click', async () => {
+  const ids = Array.from(adminJobSel);
+  if (!ids.length) return toast('请先勾选任务', 'err');
+  if (!confirm(`确定删除选中的 ${ids.length} 个任务？\n轮次明细一并删除，不可恢复！`)) return;
+  await adminJobAction(ids, 'delete');
+  adminJobSel.clear();
+  await loadAdminJobsOnly();
+});
+
+/* --------------------- 登录记录（我的 / 全员） --------------------- */
+
+/** 渲染一组登录记录为卡片列表。who 字段可选（管理员视图带用户名）。 */
+function renderLoginHistory(boxId, list, withUsername) {
+  const box = $(boxId);
+  if (!box) return;
+  box.innerHTML = '';
+  if (!list || !list.length) {
+    box.innerHTML = '<p class="muted small">暂无记录</p>';
+    return;
+  }
+  for (const h of list) {
+    const el = document.createElement('div');
+    el.className = 'item';
+    const ok = h.detail === '成功';
+    // 我的记录：勾选框 + 单条删除；管理员记录：仅单条删除（避免误删他人）
+    el.innerHTML =
+      (withUsername ? '' : '<input type="checkbox" class="login-row-ck" data-id="' + h.id + '">') +
+      '<div class="main"><div class="title"></div><div class="meta"></div></div>' +
+      '<div class="actions"><span class="badge ' + (ok ? 'ok' : 'fail') + '">' +
+      (ok ? '成功' : '失败') + '</span>' +
+      '<button class="mini danger" data-del="' + h.id + '">删除</button></div>';
+    const failUser = ok ? '' : String(h.detail || '').replace(/^失败[:：]?/, '');
+    el.querySelector('.title').textContent =
+      (withUsername
+        ? (h.username ||
+            (h.user_id == null ? ('陌生账号「' + (failUser || '未知') + '」') : ('已删除用户 #' + h.user_id))) +
+          ' · '
+        : '') +
+      fmtTime(h.created_at);
+    el.querySelector('.meta').textContent =
+      'IP ' + (h.ip || '未知') +
+      (h.geoText ? '（' + h.geoText + '）' : (h.geo && h.geo.country ? '（' + h.geo.country + '）' : '')) +
+      (ok ? '' : ' · 登录失败（密码错误）');
+    // 单条删除：我的记录走本人接口，管理员走管理接口
+    const del = el.querySelector('[data-del]');
+    if (del) del.addEventListener('click', async () => {
+      if (!confirm('删除这条登录记录？')) return;
+      try {
+        const url = withUsername ? '/api/admin/login-history' : '/api/auth/login-history';
+        const r = await api(url, { method: 'DELETE', body: { ids: [h.id] } });
+        toast('已删除 ' + (r.deleted == null ? 1 : r.deleted) + ' 条', 'ok');
+        if (withUsername) await loadAdminLogins(); else await loadMyLogins();
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    box.appendChild(el);
+  }
+  const ckAll = $('my-logins-sel-all');
+  if (ckAll && !withUsername) ckAll.checked = false;
+  const cnt = $('my-logins-count');
+  if (cnt && !withUsername) cnt.textContent = '共 ' + list.length + ' 条';
+}
+
+/** 我的登录记录。 */
+async function loadMyLogins() {
+  try {
+    const r = await api('/api/auth/login-history');
+    renderLoginHistory('my-logins', r.history || [], false);
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+/** 管理端：所有用户的登录记录。 */
+async function loadAdminLogins() {
+  if (!state.user || state.user.role !== 'admin') return;
+  try {
+    const r = await api('/api/admin/login-history');
+    renderLoginHistory('admin-logins', r.history || [], true);
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+$('my-logins-refresh').addEventListener('click', loadMyLogins);
+$('admin-logins-refresh').addEventListener('click', loadAdminLogins);
+$('admin-logins-del-all').addEventListener('click', async () => {
+  if (!confirm('清空全部用户的登录记录？此操作不可恢复。')) return;
+  try {
+    const r = await api('/api/admin/login-history', { method: 'DELETE', body: {} });
+    toast('已清空 ' + r.deleted + ' 条', 'ok');
+    await loadAdminLogins();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* --------------------- 个人中心 --------------------- */
+
+/** 渲染「我的账号」概要。 */
+function renderProfile() {
+  const box = $('me-profile');
+  if (!box) return;
+  const u = state.user || {};
+  box.innerHTML = '';
+  const rows = [
+    ['用户名', u.username || '—'],
+    ['角色', u.role === 'admin' ? '管理员' : '普通用户'],
+    ['刷局上限', u.roundLimit ? (u.roundLimit + ' 局') : '不限制'],
+    ['上次登录', u.lastLoginAt ? fmtTime(u.lastLoginAt) : '—'],
+  ];
+  for (const [k, v] of rows) {
+    const line = document.createElement('div');
+    line.className = 'meta';
+    line.textContent = k + '：' + v;
+    box.appendChild(line);
+  }
+}
+
+/** 修改自己的密码。 */
+async function changeMyPassword() {
+  const oldPw = $('me-old-pw').value;
+  const np = $('me-new-pw').value;
+  const np2 = $('me-new-pw2').value;
+  if (!oldPw || !np) return toast('请填写原密码与新密码', 'err');
+  if (np !== np2) return toast('两次输入的新密码不一致', 'err');
+  try {
+    const r = await api('/api/auth/password', { method: 'POST', body: { oldPassword: oldPw, newPassword: np } });
+    if (!r.ok) return toast(r.message || '修改失败', 'err');
+    $('me-old-pw').value = ''; $('me-new-pw').value = ''; $('me-new-pw2').value = '';
+    toast('密码已修改', 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+/** 在线设备（多 IP 登录）。 */
+async function loadMySessions() {
+  const box = $('me-sessions-list');
+  if (!box) return;
+  try {
+    const r = await api('/api/me/sessions');
+    box.innerHTML = '';
+    const list = r.sessions || [];
+    const cnt = $('me-sessions-count');
+    if (cnt) cnt.textContent = '共 ' + list.length + ' 台在线' + (list.length > 1 ? '（多 IP 登录）' : '');
+    if (!list.length) { box.innerHTML = '<p class="muted small">暂无在线设备</p>'; return; }
+    for (const s of list) {
+      const el = document.createElement('div');
+      el.className = 'item';
+      el.innerHTML =
+        '<div class="main"><div class="title"></div><div class="meta"></div></div>' +
+        '<div class="actions"></div>';
+      el.querySelector('.title').textContent =
+        (s.current ? '★ 当前设备 · ' : '') + (s.device || '未知设备');
+      el.querySelector('.meta').textContent =
+        'IP ' + (s.ip || '未知') +
+        (s.geoText ? '（' + s.geoText + '）' : '') +
+        (s.trusted ? ' · 常用 IP' : '') +
+        ' · 最近活跃 ' + fmtTime(s.lastSeen);
+      const actions = el.querySelector('.actions');
+      if (s.trusted) {
+        const b = document.createElement('span');
+        b.className = 'badge ok';
+        b.textContent = '常用';
+        actions.appendChild(b);
+      }
+      if (!s.trusted && s.ip) {
+        actions.appendChild(makeMiniButton('设为常用', async () => {
+          try {
+            await api('/api/me/trusted-ips', { method: 'POST', body: { ip: s.ip } });
+            toast('已加入常用 IP', 'ok');
+            await loadMySessions(); await loadTrustedIps();
+          } catch (err) { toast(err.message, 'err'); }
+        }));
+      }
+      if (!s.current) {
+        actions.appendChild(makeMiniButton('踢出', async () => {
+          if (!confirm('踢出这台设备？该设备将立即退出登录。')) return;
+          try {
+            const r = await api('/api/me/sessions/kick', { method: 'POST', body: { token: s.tokenFull } });
+            toast('已踢出 ' + r.kicked + ' 台', 'ok');
+            await loadMySessions();
+          } catch (err) { toast(err.message, 'err'); }
+        }, 'danger'));
+        if (s.ip) {
+          actions.appendChild(makeMiniButton('踢出同 IP', async () => {
+            if (!confirm('踢出所有来自 ' + s.ip + ' 的设备？')) return;
+            try {
+              const r = await api('/api/me/sessions/kick', { method: 'POST', body: { ip: s.ip } });
+              toast('已踢出 ' + r.kicked + ' 台', 'ok');
+              await loadMySessions();
+            } catch (err) { toast(err.message, 'err'); }
+          }, 'danger'));
+        }
+      }
+      box.appendChild(el);
+    }
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+/** 常用 IP 列表。 */
+async function loadTrustedIps() {
+  const box = $('me-trusted-list');
+  if (!box) return;
+  try {
+    const r = await api('/api/me/trusted-ips');
+    box.innerHTML = '';
+    const list = r.ips || [];
+    if (!list.length) { box.innerHTML = '<p class="muted small">还没有常用 IP</p>'; return; }
+    for (const t of list) {
+      const el = document.createElement('div');
+      el.className = 'item';
+      el.innerHTML = '<div class="main"><div class="title"></div><div class="meta"></div></div><div class="actions"></div>';
+      el.querySelector('.title').textContent = t.ip;
+      el.querySelector('.meta').textContent = (t.label || '') + ' · 添加于 ' + fmtTime(t.created_at);
+      el.querySelector('.actions').appendChild(makeMiniButton('移除', async () => {
+        if (!confirm('移除常用 IP ' + t.ip + '？')) return;
+        try {
+          await api('/api/me/trusted-ips/' + t.id, { method: 'DELETE' });
+          toast('已移除', 'ok');
+          await loadTrustedIps(); await loadMySessions();
+        } catch (err) { toast(err.message, 'err'); }
+      }, 'danger'));
+      box.appendChild(el);
+    }
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+$('me-change-pw').addEventListener('click', changeMyPassword);
+$('me-sessions-refresh').addEventListener('click', loadMySessions);
+$('me-kick-others').addEventListener('click', async () => {
+  if (!confirm('踢出除当前设备外的所有设备？')) return;
+  try {
+    const r = await api('/api/me/sessions/kick', { method: 'POST', body: {} });
+    toast('已踢出 ' + r.kicked + ' 台', 'ok');
+    await loadMySessions();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('me-ip-add').addEventListener('click', async () => {
+  const ip = $('me-ip-input').value.trim();
+  if (!ip) return toast('请输入 IP', 'err');
+  try {
+    await api('/api/me/trusted-ips', { method: 'POST', body: { ip: ip, label: $('me-ip-label').value.trim() } });
+    $('me-ip-input').value = ''; $('me-ip-label').value = '';
+    toast('已加入常用 IP', 'ok');
+    await loadTrustedIps(); await loadMySessions();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('my-logins-sel-all').addEventListener('change', (e) => {
+  document.querySelectorAll('#my-logins .login-row-ck').forEach((c) => { c.checked = e.target.checked; });
+});
+$('my-logins-del-sel').addEventListener('click', async () => {
+  const ids = Array.from(document.querySelectorAll('#my-logins .login-row-ck'))
+    .filter((c) => c.checked).map((c) => Number(c.dataset.id));
+  if (!ids.length) return toast('请先勾选要删除的记录', 'err');
+  if (!confirm('删除选中的 ' + ids.length + ' 条登录记录？')) return;
+  try {
+    const r = await api('/api/auth/login-history', { method: 'DELETE', body: { ids } });
+    toast('已删除 ' + r.deleted + ' 条', 'ok');
+    await loadMyLogins();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('my-logins-del-all').addEventListener('click', async () => {
+  if (!confirm('清空全部登录记录？此操作不可恢复。')) return;
+  try {
+    const r = await api('/api/auth/login-history', { method: 'DELETE', body: {} });
+    toast('已清空 ' + r.deleted + ' 条', 'ok');
+    await loadMyLogins();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* --------------------- 批量开任务（多个小猿账号） --------------------- */
+// 批量开任务：两个面板各一份多选列表，勾谁就给谁开（每个账号一个独立任务，参数取自当前面板）。
+
+const batchSel = { grind: new Set(), prac: new Set() };
+
+function renderBatchPicker(boxId, accounts, sel) {
+  const box = $(boxId);
+  if (!box) return;
+  box.innerHTML = '';
+  if (!accounts.length) {
+    box.innerHTML = '<p class="muted small">（还没有小猿账号，先去「小猿账号」页添加）</p>';
+    return;
+  }
+  for (const a of accounts) {
+    const label = document.createElement('label');
+    label.className = 'batch-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'pick';
+    cb.checked = sel.has(String(a.id));
+    cb.addEventListener('change', () => {
+      if (cb.checked) sel.add(String(a.id)); else sel.delete(String(a.id));
+      updateBatchLabel();
+    });
+    const span = document.createElement('span');
+    span.textContent = a.name + '（uid ' + (a.yfdU || '?') + '）';
+    const ks = (a.cookieNames || []).filter((n) => n.indexOf('ks_') === 0);
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    sub.textContent = ks.length ? '设备链✓' : '设备链✗';
+    label.append(cb, span, sub);
+    box.appendChild(label);
+  }
+  updateBatchLabel();
+}
+
+/** 刷新两个「批量开始」按钮上的数量。 */
+function updateBatchLabel() {
+  const g = $('grind-batch-start');
+  if (g) g.textContent = '批量开始刷局（' + batchSel.grind.size + '）';
+  const p = $('prac-batch-start');
+  if (p) p.textContent = '批量开始刷练习（' + batchSel.prac.size + '）';
+}
+
+/** 收集「刷局」面板当前这套参数（不含账号 id）。 */
+function collectPkBody() {
+  const strokeEl = document.querySelector('input[name="strokeMode"]:checked');
+  const body = {
+    pointId: Number($('grind-point').value || 1951),
+    rounds: Number($('grind-rounds').value || 10),
+    gapMinMs: Number($('grind-gapmin').value || 0),
+    gapMaxMs: Number($('grind-gapmax').value || 0),
+    submitDelayMinMs: Number($('grind-delaymin').value || 8000),
+    submitDelayMaxMs: Number($('grind-delaymax').value || 12000),
+    rateLimitBaseMs: Number($('grind-rlbase').value || 10000),
+    rateLimitMaxWait: Number($('grind-rlmax').value || 2),
+    matchRetryIntervalMs: Number(($('grind-mretry') || {}).value || 10000),
+    matchRetryMaxMs: Number(($('grind-mmax') || {}).value || 120000),
+    strokeMode: strokeEl ? strokeEl.value : 'ARC',
+  };
+  // costTime 留空 = 自动（服务端按题数 × 5ms 给下限）
+  const cost = $('grind-cost').value.trim();
+  if (cost !== '') body.costTimeMs = Number(cost);
+  return body;
+}
+
+/** 收集「刷练习」面板当前这套参数。 */
+function collectExerciseBody() {
+  return {
+    keypointId: Number($('prac-kp').value || 16),
+    limit: Number($('prac-limit').value || 100),
+    rounds: Number($('prac-rounds').value || 1),
+    gapMinMs: Number($('prac-gapmin').value || 0),
+    gapMaxMs: Number($('prac-gapmax').value || 0),
+  };
+}
+
+/**
+ * 批量开任务。
+ *
+ * @param {'pk'|'exercise'} kind
+ */
+async function batchStartJobs(kind) {
+  const sel = kind === 'exercise' ? batchSel.prac : batchSel.grind;
+  const ids = Array.from(sel).map(Number).filter((n) => n > 0);
+  if (!ids.length) return toast('先勾选至少一个小猿账号', 'err');
+  const btn = $(kind === 'exercise' ? 'prac-batch-start' : 'grind-batch-start');
+  btn.disabled = true;
+  btn.textContent = '启动中…';
+  try {
+    const body = kind === 'exercise'
+      ? Object.assign({ kind: 'exercise', leoAccountIds: ids }, collectExerciseBody())
+      : Object.assign({ kind: 'pk', leoAccountIds: ids }, collectPkBody());
+    const r = await api('/api/jobs/batch', { method: 'POST', body: body });
+    toast(r.message || '已启动', r.failed ? 'err' : 'ok');
+    // 逐条结果说清楚，失败的单独标出来（比如那个号没设备链）
+    const lines = (r.results || []).map((x) =>
+      (x.name || ('#' + x.leoAccountId)) + ' → ' +
+      (x.ok ? ('任务 #' + x.jobId) : ('失败：' + (x.message || '未知'))));
+    if (kind === 'exercise') {
+      const log = $('prac-runlog');
+      for (const l of lines) logLine(log, l, 'l-dim');
+    } else {
+      const log = $('log');
+      for (const l of lines) logLine(log, '[批量] ' + l, 'l-dim');
+    }
+    await loadJobs();
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    btn.disabled = false;
+    updateBatchLabel();
+  }
+}
+
+$('grind-batch-start').addEventListener('click', () => { batchStartJobs('pk'); });
+$('prac-batch-start').addEventListener('click', () => { batchStartJobs('exercise'); });
+$('grind-batch-all').addEventListener('click', () => {
+  batchSel.grind = new Set((state.leoAccounts || []).map((a) => String(a.id)));
+  renderBatchPicker('grind-batch', state.leoAccounts || [], batchSel.grind);
+});
+$('grind-batch-none').addEventListener('click', () => {
+  batchSel.grind.clear();
+  renderBatchPicker('grind-batch', state.leoAccounts || [], batchSel.grind);
+});
+$('prac-batch-all').addEventListener('click', () => {
+  batchSel.prac = new Set((state.leoAccounts || []).map((a) => String(a.id)));
+  renderBatchPicker('prac-batch', state.leoAccounts || [], batchSel.prac);
+});
+$('prac-batch-none').addEventListener('click', () => {
+  batchSel.prac.clear();
+  renderBatchPicker('prac-batch', state.leoAccounts || [], batchSel.prac);
+});
+
+$('btn-admin-add').addEventListener('click', async () => {
+  try {
+    await api('/api/admin/users', {
+      method: 'POST',
+      body: { username: $('admin-newuser').value, password: $('admin-newpass').value },
+    });
+    toast('已新增', 'ok');
+    $('admin-newuser').value = '';
+    $('admin-newpass').value = '';
+    loadAdmin();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* ------------------------------ 启动 ------------------------------ */
+
+async function bootstrapAfterLogin() {
+  await loadLeoAccounts();
+  await loadJobs();
+}
+
+/* ========================= 刷练习 =========================
+ *
+ * 与「刷局」是两条独立链路（PK 走 leo-game-pk，练习走 leo-star / leo-math）。
+ * 关键：练习的公共参数必须 version=3.140.1 + platform=android37，
+ * 否则被 solar-encoder 拦成 417（服务端拒绝未知版本号）。
+ */
+
+/** 把已导入的小猿账号填进练习页的下拉框。 */
+function fillPracticeLeo(accounts) {
+  const sel = $('prac-leo');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  for (const a of accounts) {
+    const o = document.createElement('option');
+    o.value = String(a.id);
+    o.textContent = a.name + '（uid ' + (a.yfdU || '?') + '）';
+    sel.appendChild(o);
+  }
+  if (prev && accounts.some((a) => String(a.id) === prev)) sel.value = prev;
+}
+
+/** 进 tab 时调用：拉账号列表填下拉，并给点提示。 */
+async function loadPractice() {
+  try {
+    const r = await api('/api/leo/accounts');
+    state.leoAccounts = r.accounts || [];
+    fillPracticeLeo(r.accounts || []);
+    renderBatchPicker('prac-batch', r.accounts || [], batchSel.prac);
+    await loadPracticeSubs();
+    if (!(r.accounts || []).length) {
+      $('prac-status').textContent = '还没有导入小猿账号 —— 先去「小猿账号」页添加。';
+    }
+    // 上次的练习任务可能还在后台跑（或留下了日志）→ 重新挂上日志流
+    restorePracticeJob();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/** 刷新分数 / 任务 / 道具。 */
+async function refreshPractice() {
+  const id = $('prac-leo').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  const box = $('prac-status');
+  box.textContent = '请求中…';
+  try {
+    const r = await api('/api/exercise/overview?leoAccountId=' + id);
+    if (!r.ok) { box.textContent = '失败：' + (r.error || '未知'); return toast(r.error || '失败', 'err'); }
+    const lines = [
+      '当前周分数 curWeekScore : ' + (r.curWeekScore == null ? '?' : r.curWeekScore),
+      '本周经验 curWeekExp     : ' + (r.curWeekExp == null ? '?' : r.curWeekExp),
+      '今日获得积分             : ' + (r.todayObtainedPoints == null ? '?' : r.todayObtainedPoints),
+      '下次倍数 nextMultiplier : ' + (r.nextMultiplier == null ? '?' : r.nextMultiplier),
+      '连续打卡三天数           : ' + (r.continuousDays == null ? '?' : r.continuousDays),
+      '当前排名 curRank        : ' + (r.curRank == null ? '?' : r.curRank),
+      '',
+      '道具: ' + (r.item ? (r.item.itemName + ' ×' + r.item.multiple + '（' + (r.item.duration / 60000) + ' 分钟）') : '无'),
+      '',
+      '今日任务:',
+    ];
+    for (const t of (r.tasks || [])) {
+      lines.push('  · ' + t.taskName + '  ' + t.curCnt + '/' + t.targetCnt +
+        '  ' + (t.taskStatus === 2 ? '已完成' : '进行中') + '  +' + t.taskScore);
+    }
+    if (r.limits) lines.push('', '上限：' + r.limits.note);
+    box.textContent = lines.join('\n');
+  } catch (e) {
+    box.textContent = '异常：' + e.message;
+    toast(e.message, 'err');
+  }
+}
+
+/** 刷分：对若干 ruleType 各上报一次。 */
+async function pumpPractice() {
+  const id = $('prac-leo').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  const out = $('prac-log');
+  out.textContent = '';
+  const say = (s) => {
+    out.textContent += s + '\n';
+    // 同「自动跟随」语义（跟随中才平滑滚，上滑后不打扰）。
+    ensureAutoFollow(out);
+    if (out.dataset.autoFollow === '1') smoothScrollToBottom(out);
+  };
+  const ruleTypes = $('prac-rts').value.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n));
+  try {
+    say('开始上报…');
+    const r = await api('/api/exercise/pump', {
+      method: 'POST',
+      body: { leoAccountId: Number(id), delta: Number($('prac-delta').value || 200), ruleTypes },
+    });
+    for (const a of (r.applied || [])) {
+      say(`  ruleType=${a.ruleType}  HTTP ${a.status}  ` + (a.gained > 0 ? `★ 入账 +${a.gained}` : '未增加（今日已记过）'));
+    }
+    say('');
+    say(`合计入账 +${r.gained}    ${r.before} → ${r.after}`);
+    if (r.gained === 0) say('（每个 ruleType 每天只记一次；今天已经报过了）');
+    toast(r.gained > 0 ? ('入账 +' + r.gained) : '本次未增加', r.gained > 0 ? 'ok' : 'err');
+  } catch (e) {
+    say('异常：' + e.message);
+    toast(e.message, 'err');
+  }
+}
+
+/** 出题（看题 / 抄答案）。 */
+async function fetchPracticeExam() {
+  const id = $('prac-leo').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  const out = $('prac-runlog');
+  out.textContent = '请求中…';
+  try {
+    const r = await api('/api/exercise/exam', {
+      method: 'POST',
+      body: { leoAccountId: Number(id), keypointId: Number($('prac-kp').value || 235001), limit: Number($('prac-limit').value || 10) },
+    });
+    if (!r.ok) { out.textContent = '失败 HTTP ' + r.status + '\n' + (r.text || ''); return toast('出题失败', 'err'); }
+    const ex = r.exam || {};
+    const lines = [
+      'examId  : ' + ex.idString,
+      '知识点  : ' + ex.keypoint + ' (id=' + ex.keypointId + ')',
+      '题数    : ' + ex.questionCnt + '   预计经验 = 答对题数 × 2 = ' + (ex.questionCnt * 2),
+      '',
+    ];
+    for (const [i, q] of (ex.questions || []).entries()) {
+      lines.push(String(i + 1).padStart(3) + '. ' + q.content + '   答案=' + q.answer);
+    }
+    out.textContent = lines.join('\n');
+  } catch (e) {
+    out.textContent = '异常：' + e.message;
+    toast(e.message, 'err');
+  }
+}
+
+/**
+ * 开始自动刷练习：POST /api/exercise/run，然后订阅 /api/exercise/stream 看实时日志。
+ * 返回任务 id（服务端落库），日志按 jobId 过滤、可在「任务」页看到、可随时停止。
+ */
+async function runPractice() {
+  const id = $('prac-leo').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  const log = $('prac-runlog');
+  log.textContent = '';
+  const say = (s, cls) => logLine(log, s, cls);
+  stopPracticeStream();
+  try {
+    const r = await api('/api/exercise/run', {
+      method: 'POST',
+      // 与「批量开练习」共用同一套参数解析
+      body: Object.assign({ leoAccountId: Number(id) }, collectExerciseBody()),
+    });
+    state.practiceJobId = r.jobId;
+    try { localStorage.setItem('pknode.pracJobId', String(r.jobId)); } catch (e) { /* 隐私模式忽略 */ }
+    setPracticeHint(r.message || ('任务 #' + r.jobId + ' 已开始'), true);
+    say(r.message || '已开始', 'l-ok');
+    $('prac-stop').disabled = false;
+    attachPracticeStream();
+    loadJobs();
+  } catch (e) {
+    say('启动失败：' + e.message, 'l-warn');
+    toast(e.message, 'err');
+  }
+}
+
+/** 顶部提示行（把任务 id 写清楚，便于去「任务」页对照）。 */
+function setPracticeHint(text, ok) {
+  const el = $('prac-runhint');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = ok ? 'var(--ok)' : 'var(--danger)';
+}
+
+/** 「停止」练习任务（走与刷局相同的停止接口，立即中断在途请求与等待）。 */
+async function stopPractice() {
+  const jobId = state.practiceJobId;
+  if (!jobId) return toast('没有正在看的练习任务', 'err');
+  const btn = $('prac-stop');
+  btn.disabled = true;
+  btn.textContent = '正在中断…';
+  try {
+    const r = await api('/api/jobs/' + jobId + '/stop', { method: 'POST', body: { immediate: true } });
+    toast(r.message || '已停止', 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+    btn.disabled = false;
+  }
+  btn.textContent = '停止';
+}
+
+/** 练习事件渲染（type 形如 ex-match / ex-round-ok / ex-rate-limit …）。 */
+function renderPracticeEvent(d, log) {
+  let cls = '';
+  if (d.type === 'ex-ok' || d.type === 'ex-round-ok' || d.type === 'ex-match-ok' ||
+      d.type === 'ex-done' || d.type === 'ex-final') cls = 'l-ok';
+  else if (d.type === 'ex-fail' || d.type === 'ex-rate-limit' || d.type === 'ex-round-fail') cls = 'l-warn';
+  else if (d.type === 'ex-gap' || d.type === 'ex-round') cls = 'l-dim';
+  logLine(log, (d.message || d.type), cls);
+  if (d.finished) {
+    $('prac-stop').disabled = true;
+    setPracticeHint(d.message || '练习任务已结束', true);
+    loadJobs();
+  }
+}
+
+/** 订阅练习事件流（服务端把所有练习事件同时镜像到 id=0 的 exercise 通道）。 */
+function attachPracticeStream() {
+  stopPracticeStream();
+  const log = $('prac-runlog');
+  const jobId = state.practiceJobId;
+  const es = new EventSource('/api/exercise/stream');
+  state.practiceStream = es;
+  es.onopen = () => logLine(log, '[已连接练习日志流…]', 'l-dim');
+  es.onmessage = (ev) => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    // 只显示「当前这个任务」的事件（同一个人可能同时挂了好几个练习任务）
+    if (jobId && d.jobId != null && Number(d.jobId) !== Number(jobId)) return;
+    renderPracticeEvent(d, log);
+  };
+  es.onerror = () => { /* EventSource 自动重连 */ };
+}
+/** 关闭练习事件流。 */
+function stopPracticeStream() {
+  if (state.practiceStream) { state.practiceStream.close(); state.practiceStream = null; }
+}
+
+/**
+ * 回到「刷练习」页时恢复上次的任务视图：按 localStorage 记住的 jobId 重新挂上日志流
+ * （服务端会回放最近的事件，任务在服务端持续跑）。
+ */
+function restorePracticeJob() {
+  if (state.practiceJobId) { attachPracticeStream(); return; }
+  let saved = null;
+  try { saved = localStorage.getItem('pknode.pracJobId'); } catch (e) { /* ignore */ }
+  if (!saved) return;
+  state.practiceJobId = Number(saved);
+  attachPracticeStream();
+  $('prac-stop').disabled = false;
+  setPracticeHint('正在显示任务 #' + saved + ' 的日志（若是历史任务，这里显示的是回放）。', true);
+}
+/* ========================= 开学季竞速（比赛逆向接口提交对局） =========================
+ *
+ * 纯 Node 直连复刻「匹配 → 对战 → 提交」；前端只负责
+ *  - 拉活动主页（知识点下拉 + 活动时间）
+ *  - 拉榜单（全国/城市）
+ *  - 起后台任务（kind='race'）+ 订阅日志流
+ */
+
+/** 把账号填进竞速页下拉（loadLeoAccounts 里调用）。 */
+function fillRaceLeo(accounts) {
+  const sel = $('race-leo');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '';
+  if (!accounts.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '（尚未导入小猿账号）';
+    sel.appendChild(o);
+    return;
+  }
+  for (const a of accounts) {
+    const o = document.createElement('option');
+    o.value = String(a.id);
+    o.textContent = a.name + '（uid ' + (a.yfdU || '?') + '）';
+    sel.appendChild(o);
+  }
+  if (prev && accounts.some((a) => String(a.id) === prev)) sel.value = prev;
+  loadRaceSubs();
+}
+
+/** 拉「选中小猿账号」的子账号列表，填进竞速页的子账号下拉（同练习页做法）。 */
+async function loadRaceSubs() {
+  const id = $('race-leo').value;
+  const sel = $('race-sub');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">（当前身份）</option>';
+  if (!id) return;
+  try {
+    const r = await api('/api/leo/accounts/' + id + '/sub-accounts');
+    for (const s of (r.subs || [])) {
+      const o = document.createElement('option');
+      o.value = String(s.userId);
+      o.textContent = (s.nickname || ('账号 ' + s.userId)) + (s.isPrimary ? '（主）' : '') + (s.isCurrent ? ' ← 当前' : '');
+      sel.appendChild(o);
+    }
+  } catch (e) { /* 不影响其它功能 */ }
+}
+
+/** 切换竞速用的子账号（走已攻破的 switch；成功后身份&榜单随之变化）。 */
+async function switchRaceSub() {
+  const id = $('race-leo').value;
+  const target = $('race-sub').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  if (!target) return toast('先选择要切换的子账号', 'err');
+  try {
+    const r = await api('/api/leo/accounts/' + id + '/switch', {
+      method: 'POST', body: { userId: Number(target) },
+    });
+    toast(r.message || '已切换', r.ok ? 'ok' : 'err');
+    await loadRaceSubs();
+    await loadLeoAccounts();   // 刷新账号列表（yfdU/身份变化）
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+/** 「获取知识点」：拉活动主页，填知识点下拉 + 状态。 */
+async function loadRaceHome() {
+  const id = $('race-leo').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  const box = $('race-home-status');
+  box.textContent = '拉取中…';
+  try {
+    const r = await api('/api/race/home?leoAccountId=' + encodeURIComponent(id));
+    if (!r.ok) {
+      box.textContent = '失败：HTTP ' + r.status + '\n' + (r.text || '');
+      return toast('获取知识点失败', 'err');
+    }
+    state.raceHome = r.home;
+    const sel = $('race-point');
+    sel.innerHTML = '';
+    const pts = (r.home && r.home.points) || [];
+    for (const p of pts) {
+      const o = document.createElement('option');
+      o.value = String(p.pointId);
+      o.textContent = p.pointName + '（' + p.pointId + '，' + (p.expectedQuestionCnt || '?') + ' 题）';
+      sel.appendChild(o);
+    }
+    if (!pts.length) {
+      const o = document.createElement('option');
+      o.value = '0';
+      o.textContent = '（活动无知识点）';
+      sel.appendChild(o);
+    }
+    const ended = r.home && r.home.activityEndTime && Date.now() > r.home.activityEndTime;
+    box.textContent = [
+      '活动 sessionId：' + ((r.home && r.home.gameSessionId) || '?'),
+      '活动时间：' + (r.home && r.home.activityStartTime ? new Date(r.home.activityStartTime).toLocaleString() : '?') +
+        ' ~ ' + (r.home && r.home.activityEndTime ? new Date(r.home.activityEndTime).toLocaleString() : '?') +
+        (ended ? '（已结束）' : '（进行中）'),
+      '知识点：' + pts.map((p) => p.pointName).join('、'),
+      '玩家：' + ((r.home && r.home.player && r.home.player.name) || '?') +
+        '（已完成 ' + ((r.home && r.home.user && r.home.user.finishCount) || 0) + ' 局）',
+    ].join('\n');
+    toast('知识点已更新（' + pts.length + ' 个）', 'ok');
+  } catch (e) {
+    box.textContent = '失败：' + e.message;
+    toast(e.message, 'err');
+  }
+}
+
+/** 「拉取榜单」。 */
+async function loadRaceRank() {
+  const id = $('race-leo').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  const pointId = Number($('race-point').value || 0);
+  if (!pointId) return toast('先点「获取知识点」选一个知识点', 'err');
+  const box = $('race-rank-log');
+  box.textContent = '拉取中…';
+  const scope = Number($('race-rank-scope').value || 1);
+  let qs = '/api/race/rank?leoAccountId=' + encodeURIComponent(id) +
+    '&pointId=' + encodeURIComponent(pointId) + '&scope=' + scope;
+  const lat = $('race-rank-lat').value;
+  const lng = $('race-rank-lng').value;
+  if (scope === 2) {
+    if (!lat || !lng) return toast('城市榜需要填纬度/经度', 'err');
+    qs += '&lat=' + encodeURIComponent(lat) + '&lng=' + encodeURIComponent(lng);
+  }
+  try {
+    const r = await api(qs);
+    if (!r.ok) {
+      box.textContent = '失败：HTTP ' + r.status + '\n' + (r.text || '');
+      return toast('榜单拉取失败', 'err');
+    }
+    const d = r.rank || {};
+    const lines = [];
+    lines.push('范围：' + (d.scope === 2 ? '城市' : '全国') + '（' + (d.regionName || '?') + '）');
+    lines.push('知识点：' + (d.curPointName || '?'));
+    if (d.self) {
+      lines.push('我的：名次 ' + (d.self.rank == null ? '?' : d.self.rank) +
+        '，costTime ' + (d.self.costTime == null ? '?' : d.self.costTime + 'ms') +
+        '，与上名差 ' + (d.self.gapCostTime == null ? '?' : d.self.gapCostTime + 'ms'));
+    }
+    lines.push('—— 榜单前 20 ——');
+    const ranks = Array.isArray(d.ranks) ? d.ranks.slice(0, 20) : [];
+    for (const it of ranks) {
+      lines.push('#' + it.rank + '  ' + ((it.player && it.player.name) || '?') +
+        '  costTime=' + (it.costTime == null ? '?' : it.costTime + 'ms') +
+        (it.self ? '  ← 我' : ''));
+    }
+    if (!ranks.length) lines.push('（榜单为空）');
+    box.textContent = lines.join('\n');
+    toast('榜单已更新', 'ok');
+  } catch (e) {
+    box.textContent = '失败：' + e.message;
+    toast(e.message, 'err');
+  }
+}
+
+/** 「开始竞速」：起后台任务 + 订阅日志流。 */
+async function runRace() {
+  const id = $('race-leo').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  const log = $('race-runlog');
+  log.textContent = '';
+  const say = (s, cls) => logLine(log, s, cls);
+  stopRaceStream();
+  const useSample = document.querySelector('input[name="raceUseSample"]:checked');
+  const aimEl = $('race-aim');
+  try {
+    const r = await api('/api/race/run', {
+      method: 'POST',
+      body: {
+        leoAccountId: Number(id),
+        pointId: Number($('race-point').value || 0),
+        questionCount: Number($('race-qcount').value || 0),
+        grade: Number($('race-grade').value || 0),
+        rounds: Number($('race-rounds').value || 1),
+        answerDelayMinMs: Number($('race-delaymin').value || 0),
+        answerDelayMaxMs: Number($('race-delaymax').value || 0),
+        gapMinMs: Number($('race-gapmin').value || 0),
+        gapMaxMs: Number($('race-gapmax').value || 0),
+        battleMaxMs: Number($('race-battlemax').value || 300000),
+        useSample: !useSample || useSample.value === '1',
+        aimCostMode: !!(aimEl && aimEl.checked),
+        aimSafetyMs: Number($('race-aimsafety').value || 40),
+      },
+    });
+    state.raceJobId = r.jobId;
+    try { localStorage.setItem('pknode.raceJobId', String(r.jobId)); } catch (e) { /* ignore */ }
+    setRaceHint(r.message || ('任务 #' + r.jobId + ' 已开始'), true);
+    say(r.message || '已开始', 'l-ok');
+    $('race-stop').disabled = false;
+    attachRaceStream();
+    loadJobs();
+  } catch (e) {
+    say('启动失败：' + e.message, 'l-warn');
+    toast(e.message, 'err');
+  }
+}
+
+/** 顶部提示行。 */
+function setRaceHint(text, ok) {
+  const el = $('race-runhint');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = ok ? 'var(--ok)' : 'var(--danger)';
+}
+
+/** 停止竞速任务（立即中断）。 */
+async function stopRace() {
+  const jobId = state.raceJobId;
+  if (!jobId) return toast('没有正在看的竞速任务', 'err');
+  const btn = $('race-stop');
+  btn.disabled = true;
+  btn.textContent = '正在中断…';
+  try {
+    const r = await api('/api/jobs/' + jobId + '/stop', { method: 'POST', body: { immediate: true } });
+    toast(r.message || '已停止', 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+    btn.disabled = false;
+  }
+  btn.textContent = '停止';
+}
+
+/** 竞速事件渲染。 */
+function renderRaceEvent(d, log) {
+  let cls = '';
+  if (d.type === 'ss-ack-ok' || d.type === 'ok' || d.type === 'ss-finish' || d.type === 'ss-detail-ok' || d.type === 'ss-aim-ok') cls = 'l-ok';
+  else if (d.type === 'ss-warn' || d.type === 'fail' || d.type === 'ss-gate' || d.type === 'ss-aim-fail' || d.type === 'ss-aim-warn') cls = 'l-warn';
+  else if (d.type === 'ss-round' || d.type === 'ss-gap' || d.type === 'ss-countdown' || d.type === 'ss-aim' || d.type === 'ss-aim-adjust') cls = 'l-dim';
+  logLine(log, (d.message || d.type), cls);
+  if (d.finished) {
+    $('race-stop').disabled = true;
+    setRaceHint(d.message || '竞速任务已结束', true);
+    loadJobs();
+  }
+}
+
+/** 订阅竞速事件流（服务端镜像到 raceMirror 通道）。 */
+function attachRaceStream() {
+  stopRaceStream();
+  const log = $('race-runlog');
+  const jobId = state.raceJobId;
+  const es = new EventSource('/api/race/stream');
+  state.raceStream = es;
+  es.onopen = () => logLine(log, '[已连接竞速日志流…]', 'l-dim');
+  es.onmessage = (ev) => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (jobId && d.jobId != null && Number(d.jobId) !== Number(jobId)) return;
+    renderRaceEvent(d, log);
+  };
+  es.onerror = () => { /* EventSource 自动重连 */ };
+}
+
+/** 关闭竞速事件流。 */
+function stopRaceStream() {
+  if (state.raceStream) { state.raceStream.close(); state.raceStream = null; }
+}
+
+/** 回到竞速页时恢复上次的任务视图。 */
+function restoreRaceJob() {
+  if (state.raceJobId) { attachRaceStream(); return; }
+  let saved = null;
+  try { saved = localStorage.getItem('pknode.raceJobId'); } catch (e) { /* ignore */ }
+  if (!saved) return;
+  state.raceJobId = Number(saved);
+  attachRaceStream();
+  $('race-stop').disabled = false;
+  setRaceHint('正在显示任务 #' + saved + ' 的日志（若是历史任务，这里显示的是回放）。', true);
+}
+
+/* ========================= 设备链池 ========================= */
+async function loadDeviceChains() {
+  try {
+    const r = await api('/api/device-chains');
+    state.leoChains = r.chains || [];
+    renderDeviceChains(state.leoChains);
+    // 账号卡片上的下拉也跟着刷新（新加/删掉的链会体现在选项里）
+    syncLeoChainSelects();
+  } catch (e) { /* 未登录等，忽略 */ }
+}
+function renderDeviceChains(list) {
+  const box = $('dc-list');
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<p class="muted small">池子里还没有设备链。新登录的账号将没有 ks_*（PK 会 400）；' +
+      '带设备链的 cookie 粘贴进来时会自动收进池里。</p>';
+    return;
+  }
+  for (const c of list) {
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.innerHTML = '<div><div class="title"></div><div class="meta"></div></div>' +
+      '<div class="actions"><button class="mini danger" data-dc-del="' + c.id + '">删除</button></div>';
+    el.querySelector('.title').textContent = c.label + '（ks_deviceid=' + (c.deviceId || '?') + '）';
+    const use = Number(c.useCount || 0);
+    el.querySelector('.meta').textContent =
+      (c.names || []).join(',') + ' · ' + c.bytes + 'B · ' + (c.enabled ? '启用' : '停用') +
+      ' · 被 ' + use + ' 个账号指定使用';
+    box.appendChild(el);
+  }
+}
+async function addDeviceChain() {
+  const cookie = $('dc-cookie').value.trim();
+  if (!cookie) return toast('先粘贴设备链 cookie', 'err');
+  try {
+    const r = await api('/api/device-chains', {
+      method: 'POST', body: { label: $('dc-label').value.trim(), cookie: cookie },
+    });
+    toast((r.created ? '已保存' : '已更新') + '：ks_deviceid=' + r.deviceId, 'ok');
+    $('dc-cookie').value = '';
+    $('dc-label').value = '';
+    await loadDeviceChains();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function onDeviceChainListClick(ev) {
+  const id = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-dc-del');
+  if (!id) return;
+  const c = (state.leoChains || []).find((x) => String(x.id) === String(id));
+  const use = Number((c && c.useCount) || 0);
+  if (!confirm('删除这份设备链？' +
+    (use > 0 ? '有 ' + use + ' 个账号正指定使用它，删除后这些账号会退回「自动（池里轮换）」。' : '没有账号正在指定使用它。') +
+    ' 已落在账号 cookie 里的 ks_* 不受影响。')) return;
+  try {
+    await api('/api/device-chains/' + id, { method: 'DELETE' });
+    toast('已删除', 'ok');
+    await loadDeviceChains();
+  } catch (e) { toast(e.message, 'err'); }
+}
+/**
+ * 拉「选中小猿账号」的子账号列表，填进练习页的子账号下拉。
+ *
+ * ⚠️ 练习与「当前身份」绑定：切号后练习/刷分都跑在新身份下。
+ * 子账号名字/头像来自 batchGet（需 sign）。
+ */
+async function loadPracticeSubs() {
+  const id = $('prac-leo').value;
+  const sel = $('prac-sub');
+  sel.innerHTML = '<option value="">（当前身份）</option>';
+  if (!id) return;
+  try {
+    const r = await api('/api/leo/accounts/' + id + '/sub-accounts');
+    for (const s of (r.subs || [])) {
+      const o = document.createElement('option');
+      o.value = String(s.userId);
+      o.textContent = (s.nickname || ('账号 ' + s.userId)) + (s.isPrimary ? '（主）' : '') + (s.isCurrent ? ' ← 当前' : '');
+      sel.appendChild(o);
+    }
+  } catch (e) { /* 不影响其它功能 */ }
+}
+
+/** 切换练习用的子账号（走已攻破的 switch），成功后刷新分数。 */
+async function switchPracticeSub() {
+  const id = $('prac-leo').value;
+  const target = $('prac-sub').value;
+  if (!id) return toast('先选择小猿账号', 'err');
+  if (!target) return toast('先选择要切换的子账号', 'err');
+  try {
+    const r = await api('/api/leo/accounts/' + id + '/switch', {
+      method: 'POST', body: { userId: Number(target) },
+    });
+    toast(r.message || '已切换', r.ok ? 'ok' : 'err');
+    await loadPracticeSubs();
+    await refreshPractice();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+/* ========================= 刷练习 结束 ========================= */
+
+/* ========================= 配置持久化 ========================= */
+/*
+ * 把「刷局 / 刷练习」面板里的配置存进 localStorage。
+ * 对下面这些输入框统一「改即存、启动即回填」。只存字符串，语义校验仍由各表单自己负责。
+ */
+const PERSIST_IDS = [
+  // 刷 PK 局
+  'grind-point', 'grind-rounds', 'grind-gapmin', 'grind-gapmax',
+  'grind-delaymin', 'grind-delaymax', 'grind-rlbase', 'grind-rlmax',
+  'grind-mretry', 'grind-mmax', 'grind-cost',
+  // 刷练习
+  'prac-kp', 'prac-limit', 'prac-rounds', 'prac-gapmin', 'prac-gapmax',
+  'prac-delta', 'prac-rts',
+  // 开学季竞速
+  'race-delaymin', 'race-delaymax', 'race-qcount', 'race-grade', 'race-rounds',
+  'race-gapmin', 'race-gapmax', 'race-battlemax', 'race-rank-scope',
+  'race-rank-lat', 'race-rank-lng', 'race-aimsafety',
+];
+
+/* 复选框型配置（bindPersist 只处理 value；这里单独持久化） */
+const PERSIST_CHECKS = ['race-aim'];
+
+function bindPersist() {
+  for (const id of PERSIST_IDS) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const key = 'pknode.cfg.' + id;
+    try {
+      const saved = localStorage.getItem(key);
+      // 只有「存过」才覆盖 HTML 默认值；空串也算有效（用户有意清空）。
+      if (saved !== null) el.value = saved;
+    } catch (e) { /* 隐私模式等，忽略 */ }
+    const save = () => { try { localStorage.setItem(key, el.value); } catch (e) { /* ignore */ } };
+    el.addEventListener('change', save);
+    el.addEventListener('blur', save);
+  }
+  for (const id of PERSIST_CHECKS) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const key = 'pknode.cfg.' + id;
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved !== null) el.checked = saved === '1';
+    } catch (e) { /* ignore */ }
+    const save = () => { try { localStorage.setItem(key, el.checked ? '1' : '0'); } catch (e) { /* ignore */ } };
+    el.addEventListener('change', save);
+  }
+}
+
+(async function init() {
+  bindPersist();
+  try {
+    const ok = await refreshMe();
+    if (ok) await bootstrapAfterLogin();
+  } catch (e) {
+    showView('auth');
+  }
+})();

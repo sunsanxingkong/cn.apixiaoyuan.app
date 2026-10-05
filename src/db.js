@@ -1,0 +1,981 @@
+'use strict';
+/**
+ * 数据库层（Node 内置 node:sqlite，零外部依赖）。
+ * - 单进程同步 API（别在热路径全表扫描，已加索引）。
+ * - 用户口令：scrypt + 每用户随机 salt（零依赖，抗暴力破解）。
+ * - 小猿 cookie：`leo_accounts.cookies_json` 每个 value 都加密（AES-256-GCM，见 cookiecrypt）；
+ *   name/domain/path 明文便于「只列 cookie 名」。密钥来自 PK_SECRET 或 data/secret.key（0600）。
+ *   => 光拿 db 文件打不开登录态与设备链，要同时拿密钥文件。
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { DatabaseSync } = require('node:sqlite');
+const cookiecrypt = require('./cookiecrypt');
+const { config } = require('./config');
+
+let db = null;
+
+/* ----------------------------- 口令哈希 ----------------------------- */
+
+function hashPassword(password, saltHex) {
+  const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
+  // N=16384 在手机上约 50ms，够用且不拖慢登录。
+  const hash = crypto.scryptSync(password, salt, 32, { N: 16384, r: 8, p: 1 });
+  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
+}
+
+function verifyPassword(password, stored) {
+  try {
+    const [algo, saltHex, hashHex] = String(stored).split('$');
+    if (algo !== 'scrypt' || !saltHex || !hashHex) return false;
+    const salt = Buffer.from(saltHex, 'hex');
+    const expect = Buffer.from(hashHex, 'hex');
+    const got = crypto.scryptSync(password, salt, expect.length, { N: 16384, r: 8, p: 1 });
+    return crypto.timingSafeEqual(expect, got);
+  } catch {
+    return false;
+  }
+}
+
+/* ------------------------------- 建表 ------------------------------- */
+
+const SCHEMA = `
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+-- 本服务自己的账号（不是小猿账号）
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT    NOT NULL UNIQUE,
+  password_hash TEXT    NOT NULL,
+  role          TEXT    NOT NULL DEFAULT 'user',   -- 'admin' | 'user'
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  last_login_at INTEGER
+);
+
+-- 会话（登录本服务后签发的 token）
+CREATE TABLE IF NOT EXISTS sessions (
+  token      TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  ip         TEXT,     -- 登录来源 IP（用于「多 IP 登录 / 踢出其他设备」）
+  last_seen  INTEGER,  -- 最近活跃时间
+  ua         TEXT      -- User-Agent（粗解析出设备/浏览器）
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- 小猿账号登录态（cookie，含设备链 sid/ks_*）
+--   device_chain_id 指「这个账号固定用池里哪一份设备链」；NULL = 不指定（_auto：池里随机挑一份补齐）。
+--   导入时若粘贴内容自带 ks_*，会自动把这份收进池并绑到该账号上（见 leo-accounts.applyDeviceChain）。
+CREATE TABLE IF NOT EXISTS leo_accounts (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name            TEXT    NOT NULL,
+  cookies_json    TEXT    NOT NULL,          -- [{name,value,domain,path}]
+  yfd_u           TEXT,                      -- userid cookie 的值
+  grade           INTEGER,
+  device_chain_id INTEGER,                   -- device_chains.id（NULL=自动挑一份）
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_leo_accounts_user ON leo_accounts(user_id);
+-- 注：idx_leo_accounts_chain 依赖 device_chain_id，必须等 init() 里的 ALTER 先跑完，
+-- 否则老库上整段 SCHEMA 会在建索引这句就炸（见 init）。
+
+-- 设备链池：多份 ks_*（同一设备可来自不同 App 账号），登录账号自动挑一份补齐。
+--   value 同样加密存储（见 cookiecrypt）；label 只是给人看的备注。
+CREATE TABLE IF NOT EXISTS device_chains (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  label      TEXT    NOT NULL DEFAULT '设备链',
+  cookies_json TEXT  NOT NULL,          -- [{name,value,domain,path}]（value 加密）
+  device_id  TEXT,                      -- ks_deviceid（明文，便于识别/去重）
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- 子账号（从小猿上下文接口拉取，可随时刷新）
+CREATE TABLE IF NOT EXISTS sub_accounts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  leo_account_id INTEGER NOT NULL REFERENCES leo_accounts(id) ON DELETE CASCADE,
+  user_id        INTEGER NOT NULL,          -- 小猿的 userId
+  nickname       TEXT,
+  grade          INTEGER,
+  avatar_url     TEXT,
+  primary_user_id INTEGER,
+  is_primary     INTEGER NOT NULL DEFAULT 0,
+  raw_json       TEXT,
+  updated_at     INTEGER NOT NULL,
+  UNIQUE(leo_account_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sub_accounts_leo ON sub_accounts(leo_account_id);
+
+-- 刷局任务
+CREATE TABLE IF NOT EXISTS jobs (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  leo_account_id INTEGER NOT NULL REFERENCES leo_accounts(id) ON DELETE CASCADE,
+  sub_user_id    INTEGER,
+  status         TEXT    NOT NULL,          -- queued|running|done|failed|stopped
+  config_json    TEXT    NOT NULL,          -- 刷局参数快照
+  rounds_total   INTEGER NOT NULL,
+  rounds_done    INTEGER NOT NULL DEFAULT 0,
+  rounds_failed  INTEGER NOT NULL DEFAULT 0,
+  created_at     INTEGER NOT NULL,
+  started_at     INTEGER,
+  finished_at    INTEGER,
+  error          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, created_at DESC);
+
+-- 每一轮的明细（日志 + 结果）
+CREATE TABLE IF NOT EXISTS job_rounds (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id     INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  round_no   INTEGER NOT NULL,
+  ok         INTEGER NOT NULL,
+  http_code  INTEGER,
+  message    TEXT,
+  detail     TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_job_rounds_job ON job_rounds(job_id, round_no);
+
+-- 键值设置（默认刷局参数 / 穿透开关等）
+CREATE TABLE IF NOT EXISTS kv (
+  k          TEXT PRIMARY KEY,
+  v          TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- 审计日志
+CREATE TABLE IF NOT EXISTS audit (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER,
+  action     TEXT NOT NULL,
+  detail     TEXT,
+  ip         TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_time ON audit(created_at DESC);
+`;
+
+/**
+ * 给老库补列（CREATE TABLE 对已有表不生效，必须 ALTER）。
+ * 幂等：已存在同名列时直接跳过。
+ */
+function ensureColumn(table, column, ddl) {
+  const cols = get().prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) get().exec(ddl);
+}
+
+function init() {
+  fs.mkdirSync(path.dirname(config.dbFile), { recursive: true });
+  db = new DatabaseSync(config.dbFile);
+  db.exec(SCHEMA);
+
+  // 老库补列：账号 → 设备链绑定（v1.8.1 新增；老库没有这一列）
+  ensureColumn('leo_accounts', 'device_chain_id',
+    'ALTER TABLE leo_accounts ADD COLUMN device_chain_id INTEGER');
+  // 补列之后才能建依赖它的索引（放前面会让老库上 SCHEMA 直接失败）
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_leo_accounts_chain ON leo_accounts(device_chain_id)');
+    // 登录历史按「用户 + 动作」查（我的登录记录 / 全员登录记录都要走这个条件）
+    db.exec('CREATE INDEX IF NOT EXISTS idx_audit_user_action ON audit(user_id, action)');
+  } catch (e) { /* 索引重复/不支持则忽略 */ }
+
+  // 老库补列：小猿账号绑定手机号（短信/密码登录时已知，用于脱敏展示）
+  ensureColumn('leo_accounts', 'phone',
+    'ALTER TABLE leo_accounts ADD COLUMN phone TEXT');
+
+  // 老库补列：每用户可刷局数上限（0 = 不限制；管理员在后台设置）
+  ensureColumn('users', 'round_limit',
+    'ALTER TABLE users ADD COLUMN round_limit INTEGER NOT NULL DEFAULT 0');
+
+  // 老库补列：会话记录 IP / 最近活跃 / UA（个人中心「多 IP 登录 / 踢出其他设备」用）
+  ensureColumn('sessions', 'ip', 'ALTER TABLE sessions ADD COLUMN ip TEXT');
+  ensureColumn('sessions', 'last_seen', 'ALTER TABLE sessions ADD COLUMN last_seen INTEGER');
+  ensureColumn('sessions', 'ua', 'ALTER TABLE sessions ADD COLUMN ua TEXT');
+
+  // 常用 IP 白名单（个人中心）：命中后该 IP 登录可跳过「异地登录提醒/额外校验」
+  db.exec(`CREATE TABLE IF NOT EXISTS trusted_ips (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ip         TEXT    NOT NULL,
+    label      TEXT,
+    created_at INTEGER NOT NULL
+  )`);
+  try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_trusted_ips_uniq ON trusted_ips(user_id, ip)'); } catch (e) { /* 忽略 */ }
+
+  // 启动即把历史明文 cookie 迁移为加密（幂等，已加密的会跳过）
+  try {
+    const m = migrateCookieEncryption();
+    if (m.reEncrypted > 0) {
+      // VACUUM：把旧明文页从 db / WAL 里彻底清掉（否则 checkpoint 前明文还在）
+      try { db.exec('VACUUM'); } catch (e) { /* 忽略 */ }
+      console.log(`[db] cookie 加密迁移：${m.reEncrypted}/${m.scanned} 条已加密（已 VACUUM 清除旧明文页）`);
+    }
+  } catch (e) {
+    console.warn('[db] cookie 加密迁移失败（不影响启动）：' + e.message);
+  }
+
+  // 首次启动写入默认管理员。
+  const row = db.prepare('SELECT COUNT(*) AS n FROM users WHERE role = ?').get('admin');
+  if (!row || row.n === 0) {
+    createUser(config.defaultAdminUser, config.defaultAdminPass, 'admin');
+    console.log(
+      `[db] 已创建默认管理员：${config.defaultAdminUser} / ${config.defaultAdminPass}（请尽快在管理后台改密）`,
+    );
+  }
+  return db;
+}
+
+function get() {
+  if (!db) throw new Error('db 未初始化');
+  return db;
+}
+
+/* ------------------------------ 用户 ------------------------------ */
+
+function createUser(username, password, role = 'user') {
+  const now = Date.now();
+  const info = get()
+    .prepare('INSERT INTO users (username, password_hash, role, created_at) VALUES (?,?,?,?)')
+    .run(String(username), hashPassword(password), role, now);
+  return Number(info.lastInsertRowid);
+}
+
+function findUserByName(username) {
+  return get().prepare('SELECT * FROM users WHERE username = ?').get(String(username));
+}
+
+function findUserById(id) {
+  return get().prepare('SELECT * FROM users WHERE id = ?').get(Number(id));
+}
+
+function setUserPassword(id, password) {
+  get().prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), Number(id));
+}
+
+function setUserDisabled(id, disabled) {
+  get().prepare('UPDATE users SET disabled = ? WHERE id = ?').run(disabled ? 1 : 0, Number(id));
+}
+
+function listUsers() {
+  return get()
+    .prepare('SELECT id, username, role, disabled, created_at, last_login_at, round_limit FROM users ORDER BY id')
+    .all();
+}
+
+/** 设置某用户的可刷局数上限（0 = 不限制）。 */
+function setUserRoundLimit(id, limit) {
+  const n = Number(limit);
+  const v = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  get().prepare('UPDATE users SET round_limit = ? WHERE id = ?').run(v, Number(id));
+  return v;
+}
+
+/** 管理员人数（用于「不能删掉最后一个管理员」的保护）。 */
+function countAdmins() {
+  const r = get().prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get();
+  return Number(r && r.n) || 0;
+}
+
+/** 某用户名下的小猿账号数（删除账号前提示用）。 */
+function countLeoAccountsOfUser(userId) {
+  const r = get().prepare('SELECT COUNT(*) AS n FROM leo_accounts WHERE user_id = ?').get(Number(userId));
+  return Number(r && r.n) || 0;
+}
+
+function deleteUser(id) {
+  get().prepare('DELETE FROM users WHERE id = ?').run(Number(id));
+}
+
+function touchLogin(id) {
+  get().prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(Date.now(), Number(id));
+}
+
+/* ------------------------------ 会话 ------------------------------ */
+
+function createSession(userId, ip, ua) {
+  const token = crypto.randomBytes(24).toString('hex');
+  const now = Date.now();
+  get()
+    .prepare('INSERT INTO sessions (token, user_id, created_at, expires_at, ip, last_seen, ua) VALUES (?,?,?,?,?,?,?)')
+    .run(token, Number(userId), now, now + config.sessionTtlMs,
+      ip == null ? null : String(ip), now, ua == null ? null : String(ua).slice(0, 300));
+  return token;
+}
+
+/** 该用户的所有未过期会话（带 IP / 最近活跃 / UA），最新在前。 */
+function listSessionsByUser(userId) {
+  return get()
+    .prepare(`SELECT token, user_id, created_at, expires_at, ip, last_seen, ua
+              FROM sessions WHERE user_id = ? AND expires_at >= ?
+              ORDER BY last_seen DESC, created_at DESC`)
+    .all(Number(userId), Date.now());
+}
+
+/** 管理员用：全部用户的未过期会话（带回用户名），最近活跃在前。 */
+function listAllSessions(limit = 500) {
+  return get()
+    .prepare(`SELECT s.token, s.user_id, u.username, s.ip, s.created_at, s.expires_at, s.last_seen, s.ua
+              FROM sessions s LEFT JOIN users u ON u.id = s.user_id
+              WHERE s.expires_at >= ?
+              ORDER BY s.last_seen DESC, s.created_at DESC LIMIT ?`)
+    .all(Date.now(), Number(limit));
+}
+
+/** 删除「某用户」的「某个 token」（个人中心踢设备用；带 user_id 防越权踢别人）。 */
+function deleteSessionOfUser(userId, token) {
+  const info = get()
+    .prepare('DELETE FROM sessions WHERE user_id = ? AND token = ?')
+    .run(Number(userId), String(token));
+  return Number(info.changes) || 0;
+}
+
+/** 刷新会话最近活跃时间（每次请求打一下，用于排序与「在线」判断）。 */
+function touchSession(token) {
+  if (!token) return;
+  try {
+    get().prepare('UPDATE sessions SET last_seen = ? WHERE token = ?').run(Date.now(), String(token));
+  } catch (e) { /* 刷新失败不影响请求 */ }
+}
+
+function getUserBySession(token) {
+  if (!token) return null;
+  const s = get().prepare('SELECT * FROM sessions WHERE token = ?').get(String(token));
+  if (!s) return null;
+  if (s.expires_at < Date.now()) {
+    get().prepare('DELETE FROM sessions WHERE token = ?').run(String(token));
+    return null;
+  }
+  return findUserById(s.user_id) || null;
+}
+
+function deleteSession(token) {
+  get().prepare('DELETE FROM sessions WHERE token = ?').run(String(token));
+}
+
+/**
+ * 清掉某用户的全部会话 —— 即「强制退出登录」。
+ * 管理员点「禁用」时必须调它：disabled 只在登录时检查，已存在的会话不受影响，否则禁用后仍能开任务。
+ */
+function deleteSessionsByUser(userId) {
+  const info = get().prepare('DELETE FROM sessions WHERE user_id = ?').run(Number(userId));
+  return Number(info.changes) || 0;
+}
+
+function purgeExpiredSessions() {
+  get().prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+}
+
+/* --------------------------- 小猿账号 --------------------------- */
+
+function addLeoAccount(userId, name, cookies, extra = {}) {
+  const now = Date.now();
+  const info = get()
+    .prepare(
+      `INSERT INTO leo_accounts (user_id, name, cookies_json, yfd_u, grade, phone, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      Number(userId),
+      String(name),
+      JSON.stringify(cookiecrypt.encryptItems(cookies)),
+      extra.yfdU == null ? null : String(extra.yfdU),
+      extra.grade == null ? null : Number(extra.grade),
+      extra.phone == null ? null : String(extra.phone),
+      now,
+      now,
+    );
+  return Number(info.lastInsertRowid);
+}
+
+
+/**
+ * 按 `yfd_u`（小猿 userid）找账号。
+ *
+ * ## 为什么需要它（2026-10-03）
+ *
+ * 老挂 App 会在**每次进 PK 页**时把当前登录态推一份过来（见其 `PkNodeSync`）。
+ * 如果这里每次 `addLeoAccount` 都新建一行，就会出现：
+ *
+ *  - 同一个号在库里堆成 N 条（id=1 / 2 / 3 …）；
+ *  - 而 App 侧把「切子账号」的结果也一起推过来时，**旧行还留着旧身份**，
+ *    于是「库里第一条」可能还是切换前的那个，看起来就是「切换后 pk-node 没跟着切」。
+ *
+ * 所以导入改成 **upsert**：按 `yfd_u` 命中就更新（刷新 cookie），不新建。
+ *
+ * ⚠️ `yfd_u` 存的是**明文**（与 cookies_json 不同，它没加密），可以直接比对。
+ *    `Number()` 两边都过一道，避免 `1066052990` 与 `'1066052990'` 比不中。
+ */
+function findLeoAccountByYfdU(userId, yfdU) {
+  const target = Number(yfdU);
+  if (!Number.isFinite(target) || target <= 0) return null;
+  const rows = get()
+    .prepare('SELECT * FROM leo_accounts WHERE user_id = ?')
+    .all(Number(userId));
+  for (const r of rows) {
+    if (Number(r.yfd_u) === target) return decryptAccountRow(r);
+  }
+  return null;
+}
+
+function updateLeoAccount(id, name, cookies, extra = {}) {
+  get()
+    .prepare(
+      `UPDATE leo_accounts SET name = ?, cookies_json = ?, yfd_u = COALESCE(?, yfd_u),
+         grade = COALESCE(?, grade), phone = COALESCE(?, phone), updated_at = ? WHERE id = ?`,
+    )
+    .run(
+      String(name),
+      JSON.stringify(cookiecrypt.encryptItems(cookies)),
+      extra.yfdU == null ? null : String(extra.yfdU),
+      extra.grade == null ? null : Number(extra.grade),
+      extra.phone == null ? null : String(extra.phone),
+      Date.now(),
+      Number(id),
+    );
+}
+
+/** 把一行 leo_accounts 的 cookies_json 解密成明文 JSON 文本（对上层透明）。 */
+function decryptAccountRow(row) {
+  if (!row) return row;
+  let items = null;
+  try { items = JSON.parse(row.cookies_json); } catch (e) { return row; }
+  const plain = cookiecrypt.decryptItems(items);
+  return Object.assign({}, row, { cookies_json: JSON.stringify(plain) });
+}
+
+/**
+ * 手机号脱敏：只保留前 2 位与后 2 位，中间一律 `*`。
+ * 例：13800138000 → 13*******00。非手机号（位数不足 4）原样返回，空值返回 null。
+ */
+function maskPhone(raw) {
+  if (raw == null) return null;
+  const p = String(raw).replace(/\D/g, '');
+  if (p.length < 4) return p || null;
+  return p.slice(0, 2) + '*'.repeat(p.length - 4) + p.slice(-2);
+}
+function listLeoAccounts(userId) {
+  return get()
+    .prepare('SELECT * FROM leo_accounts WHERE user_id = ? ORDER BY id DESC')
+    .all(Number(userId))
+    .map(decryptAccountRow)
+    .map((a) => Object.assign(a, { subAccounts: listSubAccounts(a.id) }));
+}
+
+/** 管理员用：返回全部用户的小猿账号（带回属主用户名），用于「查看所有用户的小猿账号」。 */
+function listAllLeoAccounts() {
+  return get()
+    .prepare(`SELECT la.*, u.username AS owner_username
+              FROM leo_accounts la
+              LEFT JOIN users u ON u.id = la.user_id
+              ORDER BY la.user_id, la.id DESC`)
+    .all()
+    .map(decryptAccountRow)
+    .map((a) => Object.assign(a, { subAccounts: listSubAccounts(a.id) }));
+}
+
+function getLeoAccount(id) {
+  return decryptAccountRow(get().prepare('SELECT * FROM leo_accounts WHERE id = ?').get(Number(id)));
+}
+
+function deleteLeoAccount(id) {
+  get().prepare('DELETE FROM leo_accounts WHERE id = ?').run(Number(id));
+}
+
+/**
+ * 把历史遗留的**明文** cookie 迁移为加密存储（幂等：已加密的会跳过）。
+ *
+ * @returns {{scanned:number, reEncrypted:number}}
+ */
+function migrateCookieEncryption() {
+  const rows = get().prepare('SELECT id, cookies_json FROM leo_accounts').all();
+  let re = 0;
+  const upd = get().prepare('UPDATE leo_accounts SET cookies_json = ?, updated_at = ? WHERE id = ?');
+  for (const row of rows) {
+    let items = null;
+    try { items = JSON.parse(row.cookies_json); } catch (e) { continue; }
+    if (!Array.isArray(items)) continue;
+    const plainCount = items.filter((c) => !String(c.value == null ? '' : c.value).startsWith(cookiecrypt.PREFIX)).length;
+    if (plainCount === 0) continue;                    // 全是密文 → 跳过
+    const enc = cookiecrypt.encryptItems(items);
+    upd.run(JSON.stringify(enc), Date.now(), row.id);
+    re++;
+  }
+  // 设备链池同样处理
+  const prows = get().prepare('SELECT id, cookies_json FROM device_chains').all();
+  const pupd = get().prepare('UPDATE device_chains SET cookies_json = ?, updated_at = ? WHERE id = ?');
+  for (const row of prows) {
+    let items = null;
+    try { items = JSON.parse(row.cookies_json); } catch (e) { continue; }
+    if (!Array.isArray(items)) continue;
+    const plainCount = items.filter((c) => !String(c.value == null ? '' : c.value).startsWith(cookiecrypt.PREFIX)).length;
+    if (plainCount === 0) continue;
+    pupd.run(JSON.stringify(cookiecrypt.encryptItems(items)), Date.now(), row.id);
+    re++;
+  }
+  return { scanned: rows.length + prows.length, reEncrypted: re };
+}
+
+/* --------------------------- 设备链池 --------------------------- */
+/** 新增一份设备链。 */
+function addDeviceChain(label, cookies, extra = {}) {
+  const now = Date.now();
+  const info = get()
+    .prepare(
+      `INSERT INTO device_chains (label, cookies_json, device_id, enabled, created_at, updated_at)
+       VALUES (?,?,?,?,?,?)`,
+    )
+    .run(
+      String(label || '设备链'),
+      JSON.stringify(cookiecrypt.encryptItems(cookies)),
+      extra.deviceId == null ? null : String(extra.deviceId),
+      extra.enabled === 0 ? 0 : 1,
+      now,
+      now,
+    );
+  return Number(info.lastInsertRowid);
+}
+
+/** 设备链池（已解密，可直接用）。 */
+function listDeviceChains(onlyEnabled) {
+  const rows = onlyEnabled
+    ? get().prepare('SELECT * FROM device_chains WHERE enabled = 1 ORDER BY id ASC').all()
+    : get().prepare('SELECT * FROM device_chains ORDER BY id ASC').all();
+  return rows.map((row) => {
+    let items = [];
+    try { items = JSON.parse(row.cookies_json); } catch (e) { items = []; }
+    return Object.assign({}, row, { cookies: cookiecrypt.decryptItems(items) });
+  });
+}
+
+function getDeviceChain(id) {
+  const row = get().prepare('SELECT * FROM device_chains WHERE id = ?').get(Number(id));
+  if (!row) return null;
+  let items = [];
+  try { items = JSON.parse(row.cookies_json); } catch (e) { items = []; }
+  return Object.assign({}, row, { cookies: cookiecrypt.decryptItems(items) });
+}
+
+function deleteDeviceChain(id) {
+  const cid = Number(id);
+  get().prepare('DELETE FROM device_chains WHERE id = ?').run(cid);
+  // 原来绑在它身上的账号退回「自动」（不指定），避免绑定指向已消失的行
+  get().prepare('UPDATE leo_accounts SET device_chain_id = NULL WHERE device_chain_id = ?')
+    .run(cid);
+}
+
+/**
+ * 设置某账号「固定使用哪份设备链」。
+ *
+ * @param {number} leoId  小猿账号 id
+ * @param {number|null} chainId 设备链 id；null/''/'auto' 表示「不指定（自动轮换）」
+ * @throws {Error} 设备链不存在时抛错（让上层返回 400，别悄悄绑成脏 id）
+ */
+function setLeoAccountChain(leoId, chainId) {
+  const cid = chainId === null || chainId === undefined || chainId === '' || chainId === 'auto' || chainId === 'null'
+    ? null
+    : Number(chainId);
+  if (cid != null) {
+    const row = get().prepare('SELECT id FROM device_chains WHERE id = ?').get(cid);
+    if (!row) throw new Error('设备链不存在：' + cid);
+  }
+  get()
+    .prepare('UPDATE leo_accounts SET device_chain_id = ?, updated_at = ? WHERE id = ?')
+    .run(cid, Date.now(), Number(leoId));
+  return cid;
+}
+
+/** 取某账号当前绑定的设备链 id（未绑定返回 null）。 */
+function getLeoAccountChainId(leoId) {
+  const row = get().prepare('SELECT device_chain_id FROM leo_accounts WHERE id = ?').get(Number(leoId));
+  if (!row) return null;
+  return row.device_chain_id == null ? null : Number(row.device_chain_id);
+}
+
+/** 每份设备链被几个账号指定使用（喂给 UI 显示「被 N 个账号使用」）。 */
+function chainUsageMap() {
+  const rows = get()
+    .prepare('SELECT device_chain_id, COUNT(*) AS n FROM leo_accounts WHERE device_chain_id IS NOT NULL GROUP BY device_chain_id')
+    .all();
+  const m = {};
+  for (const r of rows) m[String(r.device_chain_id)] = Number(r.n);
+  return m;
+}
+
+/** 按 ks_deviceid 去重（已存在则更新 value，返回 {id, created}）。 */
+function upsertDeviceChain(label, cookies, deviceId) {
+  if (deviceId) {
+    const row = get().prepare('SELECT id FROM device_chains WHERE device_id = ?').get(String(deviceId));
+    if (row) {
+      get().prepare('UPDATE device_chains SET label = ?, cookies_json = ?, updated_at = ? WHERE id = ?')
+        .run(String(label || '设备链'), JSON.stringify(cookiecrypt.encryptItems(cookies)), Date.now(), row.id);
+      return { id: row.id, created: false };
+    }
+  }
+  return { id: addDeviceChain(label, cookies, { deviceId: deviceId }), created: true };
+}
+
+/* ---------------------------- 子账号 ---------------------------- */
+
+function replaceSubAccounts(leoAccountId, items) {
+  const d = get();
+  d.prepare('DELETE FROM sub_accounts WHERE leo_account_id = ?').run(Number(leoAccountId));
+  const now = Date.now();
+  const stmt = d.prepare(
+    `INSERT INTO sub_accounts
+       (leo_account_id, user_id, nickname, grade, avatar_url, primary_user_id, is_primary, raw_json, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  for (const it of items) {
+    stmt.run(
+      Number(leoAccountId),
+      Number(it.userId),
+      it.nickname == null ? null : String(it.nickname),
+      it.grade == null ? null : Number(it.grade),
+      it.avatarUrl == null ? null : String(it.avatarUrl),
+      it.primaryUserId == null ? null : Number(it.primaryUserId),
+      it.isPrimary ? 1 : 0,
+      it.raw == null ? null : JSON.stringify(it.raw),
+      now,
+    );
+  }
+  return items.length;
+}
+
+function listSubAccounts(leoAccountId) {
+  return get()
+    .prepare('SELECT * FROM sub_accounts WHERE leo_account_id = ? ORDER BY is_primary DESC, user_id')
+    .all(Number(leoAccountId));
+}
+
+function getSubAccount(id) {
+  return get().prepare('SELECT * FROM sub_accounts WHERE id = ?').get(Number(id));
+}
+
+/* ----------------------------- 任务 ----------------------------- */
+
+function createJob(userId, leoAccountId, subUserId, cfg, roundsTotal) {
+  const now = Date.now();
+  // ⚠️ 参数顺序必须与列顺序严格一致：
+  // (user_id, leo_account_id, sub_user_id, status, config_json, rounds_total, created_at)
+  // 顺序错会把 config 写进 status、rounds_total 写成字符串，导致循环条件恒 false。
+  const info = get()
+    .prepare(
+      `INSERT INTO jobs (user_id, leo_account_id, sub_user_id, status, config_json, rounds_total, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    )
+    .run(
+      Number(userId),
+      Number(leoAccountId),
+      subUserId == null ? null : Number(subUserId),
+      'queued',
+      JSON.stringify(cfg),
+      Number(roundsTotal),
+      now,
+    );
+  return Number(info.lastInsertRowid);
+}
+
+function setJobStatus(id, status, patch = {}) {
+  const sets = ['status = ?'];
+  const args = [status];
+  if (patch.startedAt != null) { sets.push('started_at = ?'); args.push(patch.startedAt); }
+  // 用 `!== undefined` 判断，使「继续任务」能传 finished_at = null 显式清空
+  // （否则续跑任务带着上次结束时间，UI 像「已结束却还在跑」）。
+  if (patch.finishedAt !== undefined) { sets.push('finished_at = ?'); args.push(patch.finishedAt); }
+  if (patch.roundsDone != null) { sets.push('rounds_done = ?'); args.push(patch.roundsDone); }
+  if (patch.roundsFailed != null) { sets.push('rounds_failed = ?'); args.push(patch.roundsFailed); }
+  if (patch.error !== undefined) { sets.push('error = ?'); args.push(patch.error); }
+  args.push(Number(id));
+  get().prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+}
+
+function addJobRound(jobId, roundNo, ok, httpCode, message, detail) {
+  get()
+    .prepare(
+      `INSERT INTO job_rounds (job_id, round_no, ok, http_code, message, detail, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    )
+    .run(
+      Number(jobId),
+      Number(roundNo),
+      ok ? 1 : 0,
+      httpCode == null ? null : Number(httpCode),
+      message == null ? null : String(message),
+      detail == null ? null : String(detail).slice(0, 4000),
+      Date.now(),
+    );
+}
+
+function getJob(id) {
+  return get().prepare('SELECT * FROM jobs WHERE id = ?').get(Number(id));
+}
+
+const JOB_SELECT = `
+  SELECT j.*, u.username, la.name AS leo_name
+    FROM jobs j
+    LEFT JOIN users u ON u.id = j.user_id
+    LEFT JOIN leo_accounts la ON la.id = j.leo_account_id`;
+
+function listJobs(userId, limit = 50) {
+  return get()
+    .prepare(JOB_SELECT + ' WHERE j.user_id = ? ORDER BY j.id DESC LIMIT ?')
+    .all(Number(userId), Number(limit));
+}
+
+function listAllJobs(limit = 100) {
+  return get()
+    .prepare(JOB_SELECT + ' ORDER BY j.id DESC LIMIT ?')
+    .all(Number(limit));
+}
+
+/**
+ * 某用户「还没跑完」的任务（running / queued / paused）。
+ *
+ * 用途：管理员禁用 / 删除用户时，要把这些任务一并停下来 —— 否则用户界面上
+ * 显示「已禁用」，后台却还在替他刷局。
+ */
+function listActiveJobsByUser(userId) {
+  return get()
+    .prepare(
+      `SELECT * FROM jobs WHERE user_id = ? AND status IN ('running','queued','paused')
+       ORDER BY id DESC`,
+    )
+    .all(Number(userId));
+}
+
+function listJobRounds(jobId, limit = 200) {
+  return get()
+    .prepare('SELECT * FROM job_rounds WHERE job_id = ? ORDER BY round_no LIMIT ?')
+    .all(Number(jobId), Number(limit));
+}
+
+/**
+ * 把进程被杀时残留的 running/queued 任务标成 failed（语义：服务重启 = 任务中断）。
+ * 现在刷练习也是后台任务，重启后会留下僵尸 running 任务，启动时清理一次。
+ * @returns {number} 被标记的任务数
+ */
+function markInterruptedJobs() {
+  const now = Date.now();
+  const info = get()
+    .prepare(
+      `UPDATE jobs SET status = 'failed', finished_at = ?, error = ?
+        WHERE status IN ('running','queued')`,
+    )
+    .run(now, '服务重启，任务已中断');
+  return Number(info.changes) || 0;
+}
+
+/* ------------------------- 键值 / 审计 ------------------------- */
+
+function kvGet(k, def = null) {
+  const r = get().prepare('SELECT v FROM kv WHERE k = ?').get(String(k));
+  return r ? r.v : def;
+}
+
+function kvSet(k, v) {
+  get()
+    .prepare(
+      `INSERT INTO kv (k, v, updated_at) VALUES (?,?,?)
+       ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at`,
+    )
+    .run(String(k), String(v), Date.now());
+}
+
+function audit(userId, action, detail, ip) {
+  get()
+    .prepare('INSERT INTO audit (user_id, action, detail, ip, created_at) VALUES (?,?,?,?,?)')
+    .run(
+      userId == null ? null : Number(userId),
+      String(action),
+      detail == null ? null : String(detail).slice(0, 1000),
+      ip == null ? null : String(ip),
+      Date.now(),
+    );
+}
+
+function listAudit(limit = 200) {
+  return get()
+    .prepare('SELECT * FROM audit ORDER BY id DESC LIMIT ?')
+    .all(Number(limit));
+}
+
+/* --------------------------- 登录记录 --------------------------- */
+/**
+ * 我的登录记录：登录成功 + 登录失败都算（失败也带 IP，用户能看到是谁在试自己的号）。
+ * action='login' 由 /api/auth/login 写入：detail '成功' 或 '失败:<用户名>'。
+ */
+function listLoginHistory(userId, limit = 100) {
+  return get()
+    .prepare(`SELECT id, action, detail, ip, created_at FROM audit
+              WHERE user_id = ? AND action = 'login'
+              ORDER BY id DESC LIMIT ?`)
+    .all(Number(userId), Number(limit));
+}
+
+/** 管理员用：所有用户的登录记录（带回用户名）。 */
+function listAllLoginHistory(limit = 300) {
+  return get()
+    .prepare(`SELECT a.id, a.user_id, u.username, a.detail, a.ip, a.created_at
+              FROM audit a LEFT JOIN users u ON u.id = a.user_id
+              WHERE a.action = 'login'
+              ORDER BY a.id DESC LIMIT ?`)
+    .all(Number(limit));
+}
+
+/* --------------------------- 常用 IP（白名单） --------------------------- */
+/** 该用户的常用 IP 列表。 */
+function listTrustedIps(userId) {
+  return get()
+    .prepare('SELECT id, ip, label, created_at FROM trusted_ips WHERE user_id = ? ORDER BY id DESC')
+    .all(Number(userId));
+}
+
+/** 加一个常用 IP（按 user_id+ip 去重，重复则更新备注）。 */
+function addTrustedIp(userId, ip, label) {
+  get()
+    .prepare(`INSERT INTO trusted_ips (user_id, ip, label, created_at) VALUES (?,?,?,?)
+              ON CONFLICT(user_id, ip) DO UPDATE SET label = excluded.label`)
+    .run(Number(userId), String(ip), label == null ? null : String(label), Date.now());
+  return get().prepare('SELECT id FROM trusted_ips WHERE user_id = ? AND ip = ?')
+    .get(Number(userId), String(ip)).id;
+}
+
+/** 删一个常用 IP（带 user_id 防越权）。 */
+function deleteTrustedIp(userId, id) {
+  const info = get().prepare('DELETE FROM trusted_ips WHERE user_id = ? AND id = ?')
+    .run(Number(userId), Number(id));
+  return Number(info.changes) || 0;
+}
+
+/** 判断某 IP 是否在该用户的常用 IP 里。 */
+function isTrustedIp(userId, ip) {
+  const r = get().prepare('SELECT 1 AS y FROM trusted_ips WHERE user_id = ? AND ip = ? LIMIT 1')
+    .get(Number(userId), String(ip));
+  return !!(r && r.y);
+}
+
+/** 删除该用户自己的登录记录（可选按 id 列表；不传则全清）。返回删除条数。 */
+function deleteLoginHistory(userId, ids) {
+  const list = (Array.isArray(ids) ? ids : []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  if (!list.length) {
+    const info = get().prepare("DELETE FROM audit WHERE user_id = ? AND action = 'login'").run(Number(userId));
+    return Number(info.changes) || 0;
+  }
+  const ph = list.map(() => '?').join(',');
+  const info = get()
+    .prepare(`DELETE FROM audit WHERE user_id = ? AND action = 'login' AND id IN (${ph})`)
+    .run(Number(userId), ...list);
+  return Number(info.changes) || 0;
+}
+
+/**
+ * 管理员用：删除登录记录（可跨用户）。ids 为空 = 清空全部登录记录。
+ * 只删 action='login'，不碰其它审计条目。
+ * @returns {number} 删除条数
+ */
+function deleteLoginHistoryAdmin(ids) {
+  const list = (Array.isArray(ids) ? ids : []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  if (!list.length) {
+    const info = get().prepare("DELETE FROM audit WHERE action = 'login'").run();
+    return Number(info.changes) || 0;
+  }
+  const ph = list.map(() => '?').join(',');
+  const info = get().prepare(`DELETE FROM audit WHERE action = 'login' AND id IN (${ph})`).run(...list);
+  return Number(info.changes) || 0;
+}
+
+/* --------------------------- 任务删除 --------------------------- */
+/**
+ * 批量删除任务（连同轮次明细）。job_rounds 虽声明了 ON DELETE CASCADE，
+ * 但 better/node sqlite 默认不开外键，必须先手动清子表。
+ * 进行中的任务由调用方（server 层）先 stopJob，再进来删。
+ * @returns {number} 实际删掉的任务条数
+ */
+function deleteJobsByIds(ids) {
+  const list = (Array.isArray(ids) ? ids : [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (!list.length) return 0;
+  const ph = list.map(() => '?').join(',');
+  get().prepare(`DELETE FROM job_rounds WHERE job_id IN (${ph})`).run(...list);
+  const r = get().prepare(`DELETE FROM jobs WHERE id IN (${ph})`).run(...list);
+  return Number(r.changes);
+}
+
+module.exports = {
+  init,
+  get,
+  hashPassword,
+  verifyPassword,
+  createUser,
+  findUserByName,
+  findUserById,
+  setUserPassword,
+  setUserDisabled,
+  listUsers,
+  setUserRoundLimit,
+  countAdmins,
+  countLeoAccountsOfUser,
+  deleteUser,
+  touchLogin,
+  createSession,
+  getUserBySession,
+  deleteSession,
+  deleteSessionsByUser,
+  purgeExpiredSessions,
+  listSessionsByUser,
+  listAllSessions,
+  deleteSessionOfUser,
+  touchSession,
+  listTrustedIps,
+  addTrustedIp,
+  deleteTrustedIp,
+  isTrustedIp,
+  deleteLoginHistory,
+  deleteLoginHistoryAdmin,
+  migrateCookieEncryption,
+  addDeviceChain,
+  listDeviceChains,
+  getDeviceChain,
+  deleteDeviceChain,
+  upsertDeviceChain,
+  setLeoAccountChain,
+  getLeoAccountChainId,
+  chainUsageMap,
+  addLeoAccount,
+  updateLeoAccount,
+  findLeoAccountByYfdU,
+  listLeoAccounts,
+  listAllLeoAccounts,
+  getLeoAccount,
+  deleteLeoAccount,
+  replaceSubAccounts,
+  listSubAccounts,
+  getSubAccount,
+  maskPhone,
+  createJob,
+  setJobStatus,
+  addJobRound,
+  getJob,
+  listJobs,
+  listAllJobs,
+  listActiveJobsByUser,
+  listJobRounds,
+  markInterruptedJobs,
+  kvGet,
+  kvSet,
+  audit,
+  listAudit,
+  listLoginHistory,
+  listAllLoginHistory,
+  deleteJobsByIds,
+};

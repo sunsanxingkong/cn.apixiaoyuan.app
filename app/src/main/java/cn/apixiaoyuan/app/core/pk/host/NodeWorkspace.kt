@@ -198,6 +198,6 @@ object NodeWorkspace {
         // data 目录显式建一下：NodeRuntime 会往这里写 SQLite，不能等 node 自己建
         // （万一权限/路径问题，早点暴露在日志里）。
         dataDir.mkdirs()
-        return Result(root, true, count, version)
+        return Result(root, true, count, stamp)
     }
 }

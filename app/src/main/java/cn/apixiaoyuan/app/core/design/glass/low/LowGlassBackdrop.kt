@@ -211,6 +211,26 @@ internal class LowGlassBackdrop {
     private var capturing = false
 
     /**
+     * 是否已经至少成功 `record()` 过一帧。
+     *
+     * ★★ 2026-10-05（修「快照恒为 0×0」）：`GraphicsLayer.toImageBitmap()`
+     * 要求图层**已经有内容**。Compose 的绘制时序不受外部协程控制 ——
+     * 采样泵可能在图层被 record 之前就抓到，于是拿到 0×0（日志里 2284 条
+     * 「width & height must be > 0」就是这么来的）。
+     *
+     * 由 [LowLayerBackdropNode] 在 `draw()` 里同步 record 之后置位。
+     */
+    private var hasRecorded = false
+
+    /** 由图层节点在 record 之后调用。 */
+    fun markRecorded() {
+        hasRecorded = true
+    }
+
+    /** 是否已经至少成功 `record()` 过一帧。 */
+    fun hasRecordedAtLeastOnce(): Boolean = hasRecorded
+
+    /**
      * 抓取一帧背景。**必须在主线程协程里调用**（`toImageBitmap` 要求主线程）。
      *
      * @param force 跳过节流（首帧、或明确知道内容变了时用）
@@ -219,23 +239,15 @@ internal class LowGlassBackdrop {
         val now = SystemClock.uptimeMillis()
         if (!force && now - lastCaptureAt < captureIntervalMs) return
         if (capturing) return
+        // ★ 图层还没被 record 过 → 直接返回（抓也是 0×0，只会刷日志）。
+        if (!hasRecorded) return
         capturing = true
         lastCaptureAt = now
         try {
-            // ★★★ 2026-10-05（用户「你自己看着是一个东西吗」——修「底栏变灰板」）：
+            // ★★★ 2026-10-05：**采样源必须是「内容层」，绝不能含玻璃自己**。
             //
-            // **采样源必须是「内容层」，绝不能含玻璃自己**。
-            //
-            // 上一版为了省掉 `toImageBitmap()` 的全屏拷贝，改成 `hostView.draw(canvas)`。
-            // 但 `hostView` 是整个 Activity content view，**玻璃（底栏/顶栏）就在里面** ——
-            // 于是每一帧抓到的图里都含着「上一帧画好的玻璃」，
-            // 玻璃再折射它，反复迭代 ⇒ **收敛成一片均匀色块（灰板）**。
-            //
-            // 高版本 miuix 的 `LayerBackdrop` 没有这个问题：它是**挂在内容层节点上**录制的，
-            // 玻璃是它的兄弟节点、不在录制范围内。这就是「采样源」的语义。
-            //
-            // 所以这里改回 **layer 快照**（`toImageBitmap()`）——
-            // 它录的正是 `.lowLayerBackdrop()` 挂的那个内容层，天然不含玻璃。
+            // （历史：此前为省拷贝改成 `hostView.draw()`，但 hostView 含玻璃 →
+            //   玻璃折射自己 → 迭代收敛成均匀灰板。已改回图层快照。）
             val l = layer
             if (l != null) {
                 captureByLayer(l)
@@ -245,10 +257,6 @@ internal class LowGlassBackdrop {
             hostViewRef?.get()?.let { captureByViewDraw(it) }
         } catch (t: Throwable) {
             AppLogger.w("LowGlass", "背景快照失败：${t.message}")
-            // 图层快照失败（极老设备不支持 PixelCopy 等）→ 退回 View 绘制。
-            hostViewRef?.get()?.let {
-                runCatching { captureByViewDraw(it) }
-            }
         } finally {
             capturing = false
         }
@@ -257,12 +265,26 @@ internal class LowGlassBackdrop {
     /**
      * 从**内容层图层**抓一帧。
      *
-     * 这是主路径 —— 与 miuix 的 `LayerBackdrop` 语义一致（只含内容，不含玻璃）。
-     * 抓到的图会立刻缩到 `1/downscale`，大图随即释放。
+     * # 为什么之前一直失败（日志 2284 条 `width & height must be > 0`）
+     *
+     * `GraphicsLayer.toImageBitmap()` 是 **suspend** 且要求图层**已有内容**。
+     * 而采样泵（独立协程）的节奏和 Compose 的绘制时序是**两套时钟** ——
+     * 图层还没 `record()` 时去抓，必然 0×0。
+     *
+     * 修法（双保险）：
+     *  1. [LowLayerBackdropNode.draw] 里用 **`record(size)`**（显式尺寸，对齐 miuix
+     *     `recordLayer`）并置 `hasRecorded`；[capture] 在此之前**直接跳过**；
+     *  2. 抓到 0×0 / 抛异常时**保留上一帧快照**、**不刷日志**（避免噪音淹没真问题）。
      */
     private suspend fun captureByLayer(l: GraphicsLayer) {
-        val image = l.toImageBitmap()
+        val image = try {
+            l.toImageBitmap()
+        } catch (t: Throwable) {
+            // 拿不到（时序/兼容问题）→ 保留上一帧快照，静默。
+            return
+        }
         val full = image.asAndroidBitmap()
+        // ★ 尺寸无效 → 不覆盖旧快照（旧的可能还是有效的），且不刷日志。
         if (full.width <= 0 || full.height <= 0) return
         val ds = downscale.coerceAtLeast(1)
         val bw = max(1, full.width / ds)
@@ -373,17 +395,46 @@ private class LowLayerBackdropNode(
     }
 
     /**
-     * 上报内容层在**窗口坐标**里的位置。
-     *
-     * ★★ 2026-10-05（修「底栏变灰板」配套）：快照只含内容层（原点 = 内容层左上角），
-     * 而玻璃元素用的是窗口坐标 —— 两者相差这个偏移，裁剪时必须减掉。
+     * 上报内容层在**窗口坐标**里的位置（供裁剪时做原点偏移）。
      */
     override fun onGloballyPositioned(coordinates: androidx.compose.ui.layout.LayoutCoordinates) {
-        // ★ 用 `boundsInWindow`（已是本项目多处在用、确认可用的 API）。
+        if (!coordinates.isAttached) return
         val b = coordinates.boundsInWindow()
         backdrop.setLayerOrigin(b.left.toInt(), b.top.toInt())
     }
 
+    /**
+     * ★★ 2026-10-05（对齐 miuix `recordLayer`）：**同步录制，显式给尺寸**。
+     *
+     * # 为什么此前 `toImageBitmap()` 一直失败（日志 2284 条「width & height must be > 0」）
+     *
+     * `GraphicsLayer.toImageBitmap()` 要求图层**已经有内容且尺寸非零**。
+     * 而我的写法是「`layer.record { drawContent() }` 后由外部协程去抓」——
+     * 抓的时刻图层可能还没被 record（Compose 绘制时序不受控），
+     * 于是拿到 0×0 的位图。
+     *
+     * # miuix 的做法（`internal/LayerRecorder.kt`）
+     *
+     * ```kotlin
+     * internal inline fun DrawScope.recordLayer(
+     *     layer: GraphicsLayer,
+     *     size: IntSize = this.size.toIntSize(),   // ★ 显式传尺寸
+     *     crossinline block: DrawScope.() -> Unit,
+     * ) {
+     *     val density = node.requireDensity()
+     *     layer.record(size) { ... block() }        // ★ record(size) 这个重载
+     * }
+     * ```
+     *
+     * 关键两点：**① 传 `size`；② 在 `draw()` 里同步录**（不是事后异步抓）。
+     *
+     * # 本实现
+     *
+     * 同样在 `draw()` 里同步 `record(size)`，然后把图层画到屏幕。
+     * 低版本没有 GPU 纹理采样，所以**渲染玻璃时仍需要把图层转成位图** ——
+     * 但那一步现在由 [LowGlassBackdrop.capture] 在**确认图层已 record 过**
+     * （`hasRecorded` 标志）之后才抓，彻底避免 0×0。
+     */
     override fun ContentDrawScope.draw() {
         val layer = ownLayer
         if (layer == null) {
@@ -391,11 +442,14 @@ private class LowLayerBackdropNode(
             drawContent()
             return
         }
-        // 与 miuix-blur 的 LayerBackdrop 相同：先把内容录进图层，再把图层画到屏幕。
-        // 录制是 GPU 侧引用，不产生额外像素拷贝开销。
-        layer.record {
+        // ★ 与 miuix 逐字一致：显式传尺寸录进图层（`record(size) { ... }`）。
+        layer.record(size = androidx.compose.ui.unit.IntSize(
+            size.width.toInt().coerceAtLeast(1),
+            size.height.toInt().coerceAtLeast(1),
+        )) {
             this@draw.drawContent()
         }
+        backdrop.markRecorded()
         this.drawLayer(layer)
     }
 }

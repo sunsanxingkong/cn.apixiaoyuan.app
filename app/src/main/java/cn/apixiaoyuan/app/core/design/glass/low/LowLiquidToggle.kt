@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -152,13 +153,23 @@ internal fun LowLiquidToggle(
     LaunchedEffect(dampedDragAnimation) {
         snapshotFlow { fraction }.collectLatest { dampedDragAnimation.updateValue(it) }
     }
-    // 采样泵：把本开关自身的图层抓成位图，供滑块折射。
-    // 有节流（captureIntervalMs），静止时几乎不耗电。
+    // 采样泵：把**轨道**（不含滑块自己）抓成位图，供滑块折射。
+    //
+    // ★★ 2026-10-05：改用 [LowGlassBackdrop.msUntilNextCapture] 动态节流
+    // （交互 32ms / 静止 200ms），与此前 `delay(64L)` 的固定节奏相比：
+    // 按压时跟手、静止时几乎不唤醒。
     LaunchedEffect(backdrop) {
         while (true) {
             backdrop.capture()
-            kotlinx.coroutines.delay(64L)
+            kotlinx.coroutines.delay(backdrop.msUntilNextCapture().coerceIn(8L, 250L))
         }
+    }
+    // 把「是否正在交互」告诉采样源（按压时切高频档）。
+    val togglePressed by remember {
+        derivedStateOf { dampedDragAnimation.pressProgress > 0.01f }
+    }
+    LaunchedEffect(backdrop, togglePressed) {
+        backdrop.setActive(togglePressed)
     }
     LaunchedEffect(Unit) {
         snapshotFlow { currentSelected.value() }.collectLatest { isSelected ->
@@ -170,18 +181,23 @@ internal fun LowLiquidToggle(
         }
     }
 
-    val context = LocalContext.current
-
+val context = LocalContext.current
     Box(
-        modifier
-            .then(if (enabled) Modifier else Modifier.alpha(0.38f))
-            // 把本开关（含轨道）录进采样源 —— 玻璃滑块从这里取折射材料。
-            .lowLayerBackdrop(backdrop),
+        modifier.then(if (enabled) Modifier else Modifier.alpha(0.38f)),
         contentAlignment = Alignment.CenterStart,
     ) {
         // ---- 轨道 ----
+        //
+        // ★★ 2026-10-05（对齐 kyant 版，修「开关玻璃不对」）：
+        // **layer 挂在轨道上，不是最外层 Box**。
+        //
+        // kyant 版是 `trackBackdrop = rememberLayerBackdrop()` + 轨道 Box 挂
+        // `.layerBackdrop(trackBackdrop)`，滑块玻璃采的是**轨道**（不含滑块自己）。
+        // 我此前把 `lowLayerBackdrop` 挂在**最外层 Box**（含轨道**和滑块**）
+        // ⇒ 又是「采样源含自己」，与底栏那个 bug 同源。
         Box(
             Modifier
+                .lowLayerBackdrop(backdrop)
                 .clip(RoundedCornerShape(percent = 50))
                 .drawBehind {
                     val f = dampedDragAnimation.value
